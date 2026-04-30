@@ -5,12 +5,7 @@ import psycopg
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ChatPermissions,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -43,7 +38,6 @@ def init_db():
             value TEXT
         )
         """)
-
         conn.execute("""
         CREATE TABLE IF NOT EXISTS tracked_messages (
             chat_id BIGINT,
@@ -51,7 +45,6 @@ def init_db():
             created_at BIGINT
         )
         """)
-
         conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -60,25 +53,23 @@ def init_db():
             created_at BIGINT
         )
         """)
-
         conn.execute("""
         CREATE TABLE IF NOT EXISTS banned_words (
             word TEXT PRIMARY KEY
         )
         """)
-
         conn.execute("""
         CREATE TABLE IF NOT EXISTS joined_users (
             user_id BIGINT PRIMARY KEY,
             joined_at BIGINT
         )
         """)
-
         conn.execute("""
         INSERT INTO settings(key, value) VALUES
         ('group_open', '0'),
         ('auto_open', '0'),
-        ('open_message_id', '')
+        ('open_message_id', ''),
+        ('closed_message_id', '')
         ON CONFLICT DO NOTHING
         """)
 
@@ -176,6 +167,24 @@ async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def send_status_message(context: ContextTypes.DEFAULT_TYPE, text: str, setting_key: str):
+    old_open = get_setting("open_message_id", "")
+    old_closed = get_setting("closed_message_id", "")
+
+    for old_id in [old_open, old_closed]:
+        if old_id:
+            try:
+                await context.bot.delete_message(GROUP_ID, int(old_id))
+            except Exception:
+                pass
+
+    set_setting("open_message_id", "")
+    set_setting("closed_message_id", "")
+
+    msg = await context.bot.send_message(GROUP_ID, text)
+    set_setting(setting_key, str(msg.message_id))
+
+
 async def open_group(context: ContextTypes.DEFAULT_TYPE):
     perms = ChatPermissions(
         can_send_messages=True,
@@ -191,17 +200,7 @@ async def open_group(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.set_chat_permissions(GROUP_ID, perms)
     set_setting("group_open", "1")
 
-    msg = await context.bot.send_message(GROUP_ID, OPEN_TEXT)
-    set_setting("open_message_id", str(msg.message_id))
-
-    with db() as conn:
-        conn.execute(
-            """
-            INSERT INTO tracked_messages(chat_id, message_id, created_at)
-            VALUES(%s, %s, %s)
-            """,
-            (GROUP_ID, msg.message_id, int(time.time())),
-        )
+    await send_status_message(context, OPEN_TEXT, "open_message_id")
 
 
 async def close_group(context: ContextTypes.DEFAULT_TYPE):
@@ -210,32 +209,12 @@ async def close_group(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.set_chat_permissions(GROUP_ID, perms)
     set_setting("group_open", "0")
 
-    open_msg_id = get_setting("open_message_id", "")
-    if open_msg_id:
-        try:
-            await context.bot.delete_message(GROUP_ID, int(open_msg_id))
-        except Exception:
-            pass
-
-    set_setting("open_message_id", "")
-
     await delete_all_tracked(context)
-
-    msg = await context.bot.send_message(GROUP_ID, CLOSED_TEXT)
-
-    with db() as conn:
-        conn.execute(
-            """
-            INSERT INTO tracked_messages(chat_id, message_id, created_at)
-            VALUES(%s, %s, %s)
-            """,
-            (GROUP_ID, msg.message_id, int(time.time())),
-        )
+    await send_status_message(context, CLOSED_TEXT, "closed_message_id")
 
 
 async def emergency(context: ContextTypes.DEFAULT_TYPE):
     await close_group(context)
-    await delete_all_tracked(context)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -250,19 +229,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             username=EXCLUDED.username,
             first_name=EXCLUDED.first_name
             """,
-            (
-                user.id,
-                user.username,
-                user.first_name,
-                int(time.time()),
-            ),
+            (user.id, user.username, user.first_name, int(time.time())),
         )
 
     if is_admin(user.id):
-        await update.message.reply_text(
-            "Panel admin :",
-            reply_markup=admin_keyboard(),
-        )
+        await update.message.reply_text("Panel admin :", reply_markup=admin_keyboard())
     else:
         await update.message.reply_text(
             "✅ Si le groupe saute, tu auras le nouveau lien ici."
@@ -290,19 +261,23 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "toggle_auto":
         current = get_setting("auto_open", "0")
-        set_setting("auto_open", "0" if current == "1" else "1")
+        new_value = "0" if current == "1" else "1"
+        set_setting("auto_open", new_value)
 
-        await q.edit_message_text(
-            "✅ Ouverture automatique modifiée.",
-            reply_markup=admin_keyboard(),
-        )
+        now = datetime.now(TZ)
+        should_open = now.hour in [22, 23]
+
+        if new_value == "1" and should_open:
+            await open_group(context)
+            text = "✅ Ouverture automatique activée.\n\nLe groupe est ouvert maintenant."
+        else:
+            text = f"✅ Ouverture automatique : {'ON' if new_value == '1' else 'OFF'}"
+
+        await q.edit_message_text(text, reply_markup=admin_keyboard())
 
     elif data == "open_now":
         await open_group(context)
-        await q.edit_message_text(
-            "✅ Groupe ouvert.",
-            reply_markup=admin_keyboard(),
-        )
+        await q.edit_message_text("✅ Groupe ouvert.", reply_markup=admin_keyboard())
 
     elif data == "close_now":
         await close_group(context)
@@ -339,7 +314,6 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "broadcast":
         context.user_data["waiting_broadcast"] = True
-
         await q.edit_message_text(
             "📢 Envoie maintenant le message à broadcast.\n\n"
             "Tous les utilisateurs qui ont fait /start le recevront.",
@@ -376,15 +350,12 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        auto = get_setting("auto_open", "0")
-        group_open = get_setting("group_open", "0")
-
         await q.edit_message_text(
             f"ℹ️ Info bot\n\n"
             f"Base de données : {db_status}\n\n"
             f"Groupe : {group_status}\n\n"
-            f"Ouverture automatique : {'ON' if auto == '1' else 'OFF'}\n"
-            f"État groupe : {'Ouvert' if group_open == '1' else 'Fermé'}",
+            f"Ouverture automatique : {'ON' if get_setting('auto_open') == '1' else 'OFF'}\n"
+            f"État groupe : {'Ouvert' if get_setting('group_open') == '1' else 'Fermé'}",
             reply_markup=admin_keyboard(),
         )
 
@@ -401,11 +372,7 @@ async def addword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     with db() as conn:
         conn.execute(
-            """
-            INSERT INTO banned_words(word)
-            VALUES(%s)
-            ON CONFLICT DO NOTHING
-            """,
+            "INSERT INTO banned_words(word) VALUES(%s) ON CONFLICT DO NOTHING",
             (word,),
         )
 
@@ -423,15 +390,16 @@ async def delword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     word = " ".join(context.args).lower().strip()
 
     with db() as conn:
-        conn.execute(
-            "DELETE FROM banned_words WHERE word=%s",
-            (word,),
-        )
+        conn.execute("DELETE FROM banned_words WHERE word=%s", (word,))
 
     await update.message.reply_text(f"✅ Mot interdit supprimé : {word}")
 
 
 async def do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    if not text.strip():
+        await update.message.reply_text("❌ Message vide.")
+        return
+
     with db() as conn:
         users = conn.execute("SELECT user_id FROM users").fetchall()
 
@@ -446,9 +414,7 @@ async def do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
             failed += 1
 
     await update.message.reply_text(
-        f"📢 Broadcast terminé.\n\n"
-        f"✅ Envoyés : {sent}\n"
-        f"❌ Échecs : {failed}"
+        f"📢 Broadcast terminé.\n\n✅ Envoyés : {sent}\n❌ Échecs : {failed}"
     )
 
 
@@ -570,10 +536,7 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if lowered:
         with db() as conn:
-            words = [
-                r[0]
-                for r in conn.execute("SELECT word FROM banned_words").fetchall()
-            ]
+            words = [r[0] for r in conn.execute("SELECT word FROM banned_words").fetchall()]
 
         if any(word in lowered for word in words):
             try:
@@ -594,9 +557,7 @@ async def schedule_checker(context: ContextTypes.DEFAULT_TYPE):
         return
 
     now = datetime.now(TZ)
-    current_hour = now.hour
-
-    should_open = current_hour in [22, 23]
+    should_open = now.hour in [22, 23]
     group_open = get_setting("group_open", "0") == "1"
 
     if should_open and not group_open:
@@ -621,19 +582,11 @@ def main():
 
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, member_updates))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_updates))
-
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, moderate_message))
 
     app.job_queue.run_repeating(schedule_checker, interval=60, first=5)
 
-    app.run_polling(
-        allowed_updates=[
-            "message",
-            "callback_query",
-            "chat_member",
-            "my_chat_member",
-        ]
-    )
+    app.run_polling(allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"])
 
 
 if __name__ == "__main__":

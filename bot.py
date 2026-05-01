@@ -160,40 +160,63 @@ async def track_message(update: Update):
 
 async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
     with db() as conn:
-        rows = conn.execute(
+        row = conn.execute(
             """
-            SELECT chat_id, message_id
+            SELECT MIN(message_id), MAX(message_id)
             FROM tracked_messages
             WHERE chat_id=%s
-            ORDER BY message_id DESC
             """,
             (GROUP_ID,),
-        ).fetchall()
+        ).fetchone()
+
+    if not row or row[0] is None or row[1] is None:
+        print("Suppression terminée : 0 supprimés, 0 échecs")
+        return
+
+    min_id, max_id = row
 
     deleted = 0
     failed = 0
 
-    for chat_id, message_id in rows:
+    print(f"🧹 Début suppression range : {min_id} → {max_id}")
+
+    for message_id in range(max_id, min_id - 1, -1):
         try:
-            await context.bot.delete_message(chat_id, message_id)
+            await context.bot.delete_message(GROUP_ID, message_id)
             deleted += 1
+            print(f"✅ Supprimé : {message_id}")
             await asyncio.sleep(0.08)
 
         except RetryAfter as e:
+            print(f"⏳ Rate limit sur {message_id}, attente {e.retry_after}s")
             await asyncio.sleep(e.retry_after + 1)
             try:
-                await context.bot.delete_message(chat_id, message_id)
+                await context.bot.delete_message(GROUP_ID, message_id)
                 deleted += 1
-            except Exception:
+                print(f"✅ Supprimé après attente : {message_id}")
+            except Exception as retry_error:
                 failed += 1
+                print(f"❌ Échec après attente message_id={message_id} | raison={retry_error}")
 
-        except (BadRequest, TimedOut, NetworkError):
+        except BadRequest as e:
             failed += 1
-            await asyncio.sleep(0.15)
+            print(f"❌ BadRequest message_id={message_id} | raison={e}")
+            await asyncio.sleep(0.05)
 
-        except Exception:
+        except TimedOut as e:
             failed += 1
-            await asyncio.sleep(0.15)
+            print(f"❌ Timeout message_id={message_id} | raison={e}")
+            await asyncio.sleep(0.1)
+
+        except NetworkError as e:
+            failed += 1
+            print(f"❌ NetworkError message_id={message_id} | raison={e}")
+            await asyncio.sleep(0.1)
+
+        except Exception as e:
+            failed += 1
+            print(f"❌ Erreur inconnue message_id={message_id} | raison={type(e).__name__}: {e}")
+            await asyncio.sleep(0.1)
 
     with db() as conn:
         conn.execute("DELETE FROM tracked_messages WHERE chat_id=%s", (GROUP_ID,))
@@ -209,16 +232,18 @@ async def send_status_message(context: ContextTypes.DEFAULT_TYPE, text: str, set
         if old_id:
             try:
                 await context.bot.delete_message(GROUP_ID, int(old_id))
-            except Exception:
-                pass
+                print(f"✅ Ancien message d’état supprimé : {old_id}")
+            except Exception as e:
+                print(f"❌ Impossible de supprimer ancien message d’état {old_id} | {e}")
 
     set_setting("open_message_id", "")
     set_setting("closed_message_id", "")
 
     msg = await context.bot.send_message(GROUP_ID, text)
     set_setting(setting_key, str(msg.message_id))
-
     await track_message_by_id(GROUP_ID, msg.message_id)
+
+    print(f"📌 Nouveau message d’état : {msg.message_id}")
 
 
 async def open_group(context: ContextTypes.DEFAULT_TYPE):
@@ -250,12 +275,13 @@ async def close_group(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def emergency(context: ContextTypes.DEFAULT_TYPE):
-    perms = ChatPermissions(can_send_messages=False)
-
     try:
-        await context.bot.set_chat_permissions(GROUP_ID, perms)
-    except Exception:
-        pass
+        await context.bot.set_chat_permissions(
+            GROUP_ID,
+            ChatPermissions(can_send_messages=False),
+        )
+    except Exception as e:
+        print(f"❌ Erreur fermeture urgence : {e}")
 
     set_setting("group_open", "0")
 
@@ -374,8 +400,8 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with db() as conn:
                 conn.execute("SELECT 1")
             db_status = "✅ Connectée"
-        except Exception:
-            pass
+        except Exception as e:
+            db_status = f"❌ Non connectée\nErreur : {e}"
 
         try:
             chat = await context.bot.get_chat(GROUP_ID)
@@ -393,8 +419,8 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Nom : {chat.title}\n"
                     f"Bot admin : ❌ Non"
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            group_status = f"❌ Non branché\nErreur : {e}"
 
         await safe_edit(
             q,
@@ -458,8 +484,9 @@ async def do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
             await context.bot.send_message(user_id, text)
             sent += 1
             await asyncio.sleep(0.05)
-        except Exception:
+        except Exception as e:
             failed += 1
+            print(f"❌ Broadcast échec user={user_id} | {e}")
 
     await update.message.reply_text(
         f"📢 Broadcast terminé.\n\n✅ Envoyés : {sent}\n❌ Échecs : {failed}"
@@ -502,8 +529,9 @@ async def member_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await msg.delete()
-    except Exception:
-        pass
+        print(f"✅ Message entrée/sortie supprimé : {msg.message_id}")
+    except Exception as e:
+        print(f"❌ Impossible supprimer entrée/sortie {msg.message_id} | {e}")
 
 
 async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -512,6 +540,15 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not msg:
         return
+
+    print(
+        f"MSG reçu | id={msg.message_id} | "
+        f"user={user.id if user else None} | "
+        f"is_bot={user.is_bot if user else None} | "
+        f"text={bool(msg.text)} | caption={bool(msg.caption)} | "
+        f"photo={bool(msg.photo)} | video={bool(msg.video)} | "
+        f"document={bool(msg.document)} | animation={bool(msg.animation)}"
+    )
 
     if msg.chat_id == GROUP_ID:
         await track_message(update)
@@ -530,23 +567,24 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.new_chat_members or msg.left_chat_member:
         try:
             await msg.delete()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"❌ Impossible supprimer message service {msg.message_id} | {e}")
         return
 
     if get_setting("group_open", "0") != "1":
         try:
             await msg.delete()
-        except Exception:
-            pass
+            print(f"✅ Message supprimé car groupe fermé : {msg.message_id}")
+        except Exception as e:
+            print(f"❌ Impossible supprimer message groupe fermé {msg.message_id} | {e}")
 
         try:
             await context.bot.send_message(
                 user.id,
                 "🔒 Le groupe est fermé pour le moment. Ton message a été supprimé.",
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"❌ Impossible MP user={user.id} | {e}")
 
         return
 
@@ -559,15 +597,20 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if row and int(time.time()) - row[0] < 60:
         try:
             await msg.delete()
-        except Exception:
-            pass
+            print(f"✅ Spam nouveau membre supprimé : {msg.message_id}")
+        except Exception as e:
+            print(f"❌ Impossible supprimer spam nouveau membre {msg.message_id} | {e}")
 
-        await context.bot.restrict_chat_member(
-            GROUP_ID,
-            user.id,
-            ChatPermissions(can_send_messages=False),
-            until_date=int(time.time() + 30 * 24 * 3600),
-        )
+        try:
+            await context.bot.restrict_chat_member(
+                GROUP_ID,
+                user.id,
+                ChatPermissions(can_send_messages=False),
+                until_date=int(time.time() + 30 * 24 * 3600),
+            )
+        except Exception as e:
+            print(f"❌ Impossible mute nouveau membre user={user.id} | {e}")
+
         return
 
     text = msg.text or msg.caption or ""
@@ -575,15 +618,20 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text and re.search(r"[а-яА-Я\u0600-\u06FF\u4e00-\u9fff]", text):
         try:
             await msg.delete()
-        except Exception:
-            pass
+            print(f"✅ Message langue interdite supprimé : {msg.message_id}")
+        except Exception as e:
+            print(f"❌ Impossible supprimer langue interdite {msg.message_id} | {e}")
 
-        await context.bot.restrict_chat_member(
-            GROUP_ID,
-            user.id,
-            ChatPermissions(can_send_messages=False),
-            until_date=int(time.time() + 400 * 24 * 3600),
-        )
+        try:
+            await context.bot.restrict_chat_member(
+                GROUP_ID,
+                user.id,
+                ChatPermissions(can_send_messages=False),
+                until_date=int(time.time() + 400 * 24 * 3600),
+            )
+        except Exception as e:
+            print(f"❌ Impossible mute langue interdite user={user.id} | {e}")
+
         return
 
     lowered = text.lower()
@@ -598,15 +646,19 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if any(word in lowered for word in words):
             try:
                 await msg.delete()
-            except Exception:
-                pass
+                print(f"✅ Mot interdit supprimé : {msg.message_id}")
+            except Exception as e:
+                print(f"❌ Impossible supprimer mot interdit {msg.message_id} | {e}")
 
-            await context.bot.restrict_chat_member(
-                GROUP_ID,
-                user.id,
-                ChatPermissions(can_send_messages=False),
-                until_date=int(time.time() + 30 * 24 * 3600),
-            )
+            try:
+                await context.bot.restrict_chat_member(
+                    GROUP_ID,
+                    user.id,
+                    ChatPermissions(can_send_messages=False),
+                    until_date=int(time.time() + 30 * 24 * 3600),
+                )
+            except Exception as e:
+                print(f"❌ Impossible mute mot interdit user={user.id} | {e}")
 
 
 async def schedule_checker(context: ContextTypes.DEFAULT_TYPE):

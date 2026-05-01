@@ -170,6 +170,8 @@ async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
             (GROUP_ID,),
         ).fetchall()
 
+    print(f"🧹 Messages trouvés en DB pour suppression : {len(rows)}")
+
     if not rows:
         print("Suppression terminée : 0 supprimés, 0 échecs")
         return
@@ -177,17 +179,15 @@ async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
     deleted = 0
     failed = 0
 
-    print(f"🧹 Début suppression : {len(rows)} message_id enregistrés")
-
     for chat_id, message_id in rows:
         try:
             await context.bot.delete_message(chat_id, message_id)
             deleted += 1
-            print(f"✅ Supprimé : chat={chat_id} id={message_id}")
+            print(f"✅ Supprimé DB : chat={chat_id} id={message_id}")
             await asyncio.sleep(0.08)
 
         except RetryAfter as e:
-            print(f"⏳ Rate limit sur {message_id}, attente {e.retry_after}s")
+            print(f"⏳ Rate limit id={message_id}, attente {e.retry_after}s")
             await asyncio.sleep(e.retry_after + 1)
 
             try:
@@ -200,23 +200,23 @@ async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
 
         except BadRequest as e:
             failed += 1
-            print(f"❌ BadRequest id={message_id} | raison={e}")
+            print(f"❌ BadRequest id={message_id} chat={chat_id} | {e}")
             await asyncio.sleep(0.05)
 
         except TimedOut as e:
             failed += 1
-            print(f"❌ Timeout id={message_id} | raison={e}")
+            print(f"❌ Timeout id={message_id} chat={chat_id} | {e}")
             await asyncio.sleep(0.1)
 
         except NetworkError as e:
             failed += 1
-            print(f"❌ NetworkError id={message_id} | raison={e}")
+            print(f"❌ NetworkError id={message_id} chat={chat_id} | {e}")
             await asyncio.sleep(0.1)
 
         except Exception as e:
             failed += 1
-            print(f"❌ Erreur inconnue id={message_id} | {type(e).__name__}: {e}")
-            await asyncio.sleep(0.1)
+            print(f"❌ Échec suppression DB id={message_id} chat={chat_id} | {type(e).__name__}: {e}")
+            await asyncio.sleep(0.05)
 
     with db() as conn:
         conn.execute("DELETE FROM tracked_messages WHERE chat_id=%s", (GROUP_ID,))
@@ -320,6 +320,29 @@ async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Panel administrateur :", reply_markup=admin_keyboard())
 
 
+async def dbcount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+
+    with db() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*), MIN(message_id), MAX(message_id)
+            FROM tracked_messages
+            WHERE chat_id=%s
+            """,
+            (GROUP_ID,),
+        ).fetchone()
+
+    await update.message.reply_text(
+        f"DB tracked_messages\n\n"
+        f"Count : {row[0]}\n"
+        f"Min ID : {row[1]}\n"
+        f"Max ID : {row[2]}\n"
+        f"GROUP_ID : {GROUP_ID}"
+    )
+
+
 async def testdelete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin(update.effective_user.id):
         return
@@ -383,14 +406,26 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "close_now":
         await close_group(context)
-        await safe_edit(q, "🔒 Groupe fermé et messages supprimés.", reply_markup=admin_keyboard())
+        await safe_edit(
+            q,
+            "🔒 Groupe fermé et messages supprimés.",
+            reply_markup=admin_keyboard(),
+        )
 
     elif data == "emergency":
         await emergency(context)
-        await safe_edit(q, "🚨 Suppression d’urgence effectuée.", reply_markup=admin_keyboard())
+        await safe_edit(
+            q,
+            "🚨 Suppression d’urgence effectuée.",
+            reply_markup=admin_keyboard(),
+        )
 
     elif data == "add_word":
-        await safe_edit(q, "Envoie maintenant :\n\n/addword mot", reply_markup=admin_keyboard())
+        await safe_edit(
+            q,
+            "Envoie maintenant :\n\n/addword mot",
+            reply_markup=admin_keyboard(),
+        )
 
     elif data == "list_words":
         with db() as conn:
@@ -398,7 +433,11 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         words = "\n".join(f"- {r[0]}" for r in rows) or "Aucun mot interdit."
 
-        await safe_edit(q, f"📋 Mots interdits :\n\n{words}", reply_markup=admin_keyboard())
+        await safe_edit(
+            q,
+            f"📋 Mots interdits :\n\n{words}",
+            reply_markup=admin_keyboard(),
+        )
 
     elif data == "broadcast":
         context.user_data["waiting_broadcast"] = True
@@ -597,13 +636,14 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"❌ Impossible supprimer message groupe fermé {msg.message_id} | {e}")
 
-        try:
-            await context.bot.send_message(
-                user.id,
-                "🔒 Le groupe est fermé pour le moment. Ton message a été supprimé.",
-            )
-        except Exception as e:
-            print(f"❌ Impossible MP user={user.id} | {e}")
+        if not user.is_bot:
+            try:
+                await context.bot.send_message(
+                    user.id,
+                    "🔒 Le groupe est fermé pour le moment. Ton message a été supprimé.",
+                )
+            except Exception as e:
+                print(f"❌ Impossible MP user={user.id} | {e}")
 
         return
 
@@ -699,6 +739,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("panel", panel))
+    app.add_handler(CommandHandler("dbcount", dbcount))
     app.add_handler(CommandHandler("testdelete", testdelete))
     app.add_handler(CommandHandler("addword", addword))
     app.add_handler(CommandHandler("delword", delword))

@@ -160,62 +160,62 @@ async def track_message(update: Update):
 
 async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
     with db() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             """
-            SELECT MIN(message_id), MAX(message_id)
+            SELECT chat_id, message_id
             FROM tracked_messages
             WHERE chat_id=%s
+            ORDER BY message_id DESC
             """,
             (GROUP_ID,),
-        ).fetchone()
+        ).fetchall()
 
-    if not row or row[0] is None or row[1] is None:
+    if not rows:
         print("Suppression terminée : 0 supprimés, 0 échecs")
         return
-
-    min_id, max_id = row
 
     deleted = 0
     failed = 0
 
-    print(f"🧹 Début suppression range : {min_id} → {max_id}")
+    print(f"🧹 Début suppression : {len(rows)} message_id enregistrés")
 
-    for message_id in range(max_id, min_id - 1, -1):
+    for chat_id, message_id in rows:
         try:
-            await context.bot.delete_message(GROUP_ID, message_id)
+            await context.bot.delete_message(chat_id, message_id)
             deleted += 1
-            print(f"✅ Supprimé : {message_id}")
+            print(f"✅ Supprimé : chat={chat_id} id={message_id}")
             await asyncio.sleep(0.08)
 
         except RetryAfter as e:
             print(f"⏳ Rate limit sur {message_id}, attente {e.retry_after}s")
             await asyncio.sleep(e.retry_after + 1)
+
             try:
-                await context.bot.delete_message(GROUP_ID, message_id)
+                await context.bot.delete_message(chat_id, message_id)
                 deleted += 1
                 print(f"✅ Supprimé après attente : {message_id}")
             except Exception as retry_error:
                 failed += 1
-                print(f"❌ Échec après attente message_id={message_id} | raison={retry_error}")
+                print(f"❌ Échec après attente id={message_id} | {retry_error}")
 
         except BadRequest as e:
             failed += 1
-            print(f"❌ BadRequest message_id={message_id} | raison={e}")
+            print(f"❌ BadRequest id={message_id} | raison={e}")
             await asyncio.sleep(0.05)
 
         except TimedOut as e:
             failed += 1
-            print(f"❌ Timeout message_id={message_id} | raison={e}")
+            print(f"❌ Timeout id={message_id} | raison={e}")
             await asyncio.sleep(0.1)
 
         except NetworkError as e:
             failed += 1
-            print(f"❌ NetworkError message_id={message_id} | raison={e}")
+            print(f"❌ NetworkError id={message_id} | raison={e}")
             await asyncio.sleep(0.1)
 
         except Exception as e:
             failed += 1
-            print(f"❌ Erreur inconnue message_id={message_id} | raison={type(e).__name__}: {e}")
+            print(f"❌ Erreur inconnue id={message_id} | {type(e).__name__}: {e}")
             await asyncio.sleep(0.1)
 
     with db() as conn:
@@ -260,14 +260,15 @@ async def open_group(context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.set_chat_permissions(GROUP_ID, perms)
     set_setting("group_open", "1")
-
     await send_status_message(context, OPEN_TEXT, "open_message_id")
 
 
 async def close_group(context: ContextTypes.DEFAULT_TYPE):
-    perms = ChatPermissions(can_send_messages=False)
+    await context.bot.set_chat_permissions(
+        GROUP_ID,
+        ChatPermissions(can_send_messages=False),
+    )
 
-    await context.bot.set_chat_permissions(GROUP_ID, perms)
     set_setting("group_open", "0")
 
     await delete_all_tracked(context)
@@ -319,6 +320,38 @@ async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Panel administrateur :", reply_markup=admin_keyboard())
 
 
+async def testdelete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage : /testdelete 1581")
+        return
+
+    try:
+        message_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ message_id invalide.")
+        return
+
+    try:
+        await context.bot.delete_message(GROUP_ID, message_id)
+        await update.message.reply_text(f"✅ Message {message_id} supprimé.")
+        print(f"✅ TEST DELETE OK id={message_id}")
+
+    except BadRequest as e:
+        await update.message.reply_text(
+            f"❌ Impossible de supprimer {message_id}\n\nBadRequest : {e}"
+        )
+        print(f"❌ TEST DELETE BadRequest id={message_id} | {e}")
+
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Impossible de supprimer {message_id}\n\nErreur : {type(e).__name__}: {e}"
+        )
+        print(f"❌ TEST DELETE ERROR id={message_id} | {type(e).__name__}: {e}")
+
+
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -350,26 +383,14 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "close_now":
         await close_group(context)
-        await safe_edit(
-            q,
-            "🔒 Groupe fermé et messages supprimés.",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, "🔒 Groupe fermé et messages supprimés.", reply_markup=admin_keyboard())
 
     elif data == "emergency":
         await emergency(context)
-        await safe_edit(
-            q,
-            "🚨 Suppression d’urgence effectuée.",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, "🚨 Suppression d’urgence effectuée.", reply_markup=admin_keyboard())
 
     elif data == "add_word":
-        await safe_edit(
-            q,
-            "Envoie maintenant :\n\n/addword mot",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, "Envoie maintenant :\n\n/addword mot", reply_markup=admin_keyboard())
 
     elif data == "list_words":
         with db() as conn:
@@ -377,14 +398,11 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         words = "\n".join(f"- {r[0]}" for r in rows) or "Aucun mot interdit."
 
-        await safe_edit(
-            q,
-            f"📋 Mots interdits :\n\n{words}",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, f"📋 Mots interdits :\n\n{words}", reply_markup=admin_keyboard())
 
     elif data == "broadcast":
         context.user_data["waiting_broadcast"] = True
+
         await safe_edit(
             q,
             "📢 Envoie maintenant le message à broadcast.\n\n"
@@ -427,6 +445,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"ℹ️ Info bot\n\n"
             f"Base de données : {db_status}\n\n"
             f"Groupe : {group_status}\n\n"
+            f"GROUP_ID : {GROUP_ID}\n"
             f"Ouverture automatique : {'ON' if get_setting('auto_open') == '1' else 'OFF'}\n"
             f"État groupe : {'Ouvert' if get_setting('group_open') == '1' else 'Fermé'}",
             reply_markup=admin_keyboard(),
@@ -542,7 +561,7 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     print(
-        f"MSG reçu | id={msg.message_id} | "
+        f"MSG reçu | chat={msg.chat_id} | id={msg.message_id} | "
         f"user={user.id if user else None} | "
         f"is_bot={user.is_bot if user else None} | "
         f"text={bool(msg.text)} | caption={bool(msg.caption)} | "
@@ -638,10 +657,7 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if lowered:
         with db() as conn:
-            words = [
-                r[0]
-                for r in conn.execute("SELECT word FROM banned_words").fetchall()
-            ]
+            words = [r[0] for r in conn.execute("SELECT word FROM banned_words").fetchall()]
 
         if any(word in lowered for word in words):
             try:
@@ -683,6 +699,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("panel", panel))
+    app.add_handler(CommandHandler("testdelete", testdelete))
     app.add_handler(CommandHandler("addword", addword))
     app.add_handler(CommandHandler("delword", delword))
     app.add_handler(CommandHandler("broadcast", broadcast_command))

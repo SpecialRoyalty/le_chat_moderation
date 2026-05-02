@@ -71,7 +71,10 @@ def init_db():
         ('group_open', '0'),
         ('auto_open', '0'),
         ('open_message_id', ''),
-        ('closed_message_id', '')
+        ('closed_message_id', ''),
+        ('ad_enabled', '0'),
+        ('ad_text', ''),
+        ('last_ad_at', '0')
         ON CONFLICT DO NOTHING
         """)
 
@@ -100,6 +103,7 @@ def is_admin(user_id: int) -> bool:
 
 def admin_keyboard():
     auto = get_setting("auto_open", "0")
+    ad = get_setting("ad_enabled", "0")
 
     return InlineKeyboardMarkup([
         [
@@ -120,7 +124,17 @@ def admin_keyboard():
             InlineKeyboardButton("📋 Voir mots interdits", callback_data="list_words"),
         ],
         [
-            InlineKeyboardButton("📢 Broadcast utilisateurs", callback_data="broadcast")
+            InlineKeyboardButton("📢 Broadcast utilisateurs", callback_data="broadcast_users")
+        ],
+        [
+            InlineKeyboardButton("📣 Broadcast groupe", callback_data="broadcast_group")
+        ],
+        [
+            InlineKeyboardButton(
+                f"📣 Publicité : {'ON' if ad == '1' else 'OFF'}",
+                callback_data="toggle_ad",
+            ),
+            InlineKeyboardButton("✍️ Texte pub", callback_data="set_ad_text"),
         ],
         [
             InlineKeyboardButton("ℹ️ Info", callback_data="info")
@@ -158,6 +172,18 @@ async def track_message(update: Update):
     await track_message_by_id(update.message.chat_id, update.message.message_id)
 
 
+async def delete_later(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data
+    chat_id = data["chat_id"]
+    message_id = data["message_id"]
+
+    try:
+        await context.bot.delete_message(chat_id, message_id)
+        print(f"✅ Message temporaire supprimé : {message_id}")
+    except Exception as e:
+        print(f"❌ Impossible supprimer message temporaire {message_id} | {e}")
+
+
 async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
     with db() as conn:
         rows = conn.execute(
@@ -172,10 +198,6 @@ async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
 
     print(f"🧹 Messages trouvés en DB pour suppression : {len(rows)}")
 
-    if not rows:
-        print("Suppression terminée : 0 supprimés, 0 échecs")
-        return
-
     deleted = 0
     failed = 0
 
@@ -189,7 +211,6 @@ async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
         except RetryAfter as e:
             print(f"⏳ Rate limit id={message_id}, attente {e.retry_after}s")
             await asyncio.sleep(e.retry_after + 1)
-
             try:
                 await context.bot.delete_message(chat_id, message_id)
                 deleted += 1
@@ -270,7 +291,6 @@ async def close_group(context: ContextTypes.DEFAULT_TYPE):
     )
 
     set_setting("group_open", "0")
-
     await delete_all_tracked(context)
     await send_status_message(context, CLOSED_TEXT, "closed_message_id")
 
@@ -285,9 +305,56 @@ async def emergency(context: ContextTypes.DEFAULT_TYPE):
         print(f"❌ Erreur fermeture urgence : {e}")
 
     set_setting("group_open", "0")
-
     await delete_all_tracked(context)
     await send_status_message(context, CLOSED_TEXT, "closed_message_id")
+
+
+async def send_group_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    if not text.strip():
+        await update.message.reply_text("❌ Message vide.")
+        return
+
+    msg = await context.bot.send_message(GROUP_ID, text)
+    await track_message_by_id(GROUP_ID, msg.message_id)
+
+    context.job_queue.run_once(
+        delete_later,
+        when=12 * 60 * 60,
+        data={"chat_id": GROUP_ID, "message_id": msg.message_id},
+    )
+
+    await update.message.reply_text("✅ Annonce publiée dans le groupe pour 12h.")
+
+
+async def ad_checker(context: ContextTypes.DEFAULT_TYPE):
+    if get_setting("ad_enabled", "0") != "1":
+        return
+
+    if get_setting("group_open", "0") != "1":
+        return
+
+    ad_text = get_setting("ad_text", "").strip()
+    if not ad_text:
+        return
+
+    now = int(time.time())
+    last_ad_at = int(get_setting("last_ad_at", "0") or "0")
+
+    if now - last_ad_at < 12 * 60:
+        return
+
+    msg = await context.bot.send_message(GROUP_ID, ad_text)
+    await track_message_by_id(GROUP_ID, msg.message_id)
+
+    set_setting("last_ad_at", str(now))
+
+    context.job_queue.run_once(
+        delete_later,
+        when=3 * 60,
+        data={"chat_id": GROUP_ID, "message_id": msg.message_id},
+    )
+
+    print(f"📣 Publicité envoyée : {msg.message_id}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -360,19 +427,14 @@ async def testdelete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.delete_message(GROUP_ID, message_id)
         await update.message.reply_text(f"✅ Message {message_id} supprimé.")
-        print(f"✅ TEST DELETE OK id={message_id}")
-
     except BadRequest as e:
         await update.message.reply_text(
             f"❌ Impossible de supprimer {message_id}\n\nBadRequest : {e}"
         )
-        print(f"❌ TEST DELETE BadRequest id={message_id} | {e}")
-
     except Exception as e:
         await update.message.reply_text(
             f"❌ Impossible de supprimer {message_id}\n\nErreur : {type(e).__name__}: {e}"
         )
-        print(f"❌ TEST DELETE ERROR id={message_id} | {type(e).__name__}: {e}")
 
 
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -406,26 +468,14 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "close_now":
         await close_group(context)
-        await safe_edit(
-            q,
-            "🔒 Groupe fermé et messages supprimés.",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, "🔒 Groupe fermé et messages supprimés.", reply_markup=admin_keyboard())
 
     elif data == "emergency":
         await emergency(context)
-        await safe_edit(
-            q,
-            "🚨 Suppression d’urgence effectuée.",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, "🚨 Suppression d’urgence effectuée.", reply_markup=admin_keyboard())
 
     elif data == "add_word":
-        await safe_edit(
-            q,
-            "Envoie maintenant :\n\n/addword mot",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, "Envoie maintenant :\n\n/addword mot", reply_markup=admin_keyboard())
 
     elif data == "list_words":
         with db() as conn:
@@ -433,19 +483,43 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         words = "\n".join(f"- {r[0]}" for r in rows) or "Aucun mot interdit."
 
+        await safe_edit(q, f"📋 Mots interdits :\n\n{words}", reply_markup=admin_keyboard())
+
+    elif data == "broadcast_users":
+        context.user_data["waiting_user_broadcast"] = True
         await safe_edit(
             q,
-            f"📋 Mots interdits :\n\n{words}",
+            "📢 Envoie maintenant le message à envoyer aux utilisateurs.\n\n"
+            "Tous ceux qui ont fait /start le recevront.",
             reply_markup=admin_keyboard(),
         )
 
-    elif data == "broadcast":
-        context.user_data["waiting_broadcast"] = True
+    elif data == "broadcast_group":
+        context.user_data["waiting_group_broadcast"] = True
+        await safe_edit(
+            q,
+            "📣 Envoie maintenant l’annonce à publier dans le groupe.\n\n"
+            "Elle restera 12h puis sera supprimée.",
+            reply_markup=admin_keyboard(),
+        )
+
+    elif data == "toggle_ad":
+        current = get_setting("ad_enabled", "0")
+        new_value = "0" if current == "1" else "1"
+        set_setting("ad_enabled", new_value)
 
         await safe_edit(
             q,
-            "📢 Envoie maintenant le message à broadcast.\n\n"
-            "Tous les utilisateurs qui ont fait /start le recevront.",
+            f"📣 Publicité : {'ON' if new_value == '1' else 'OFF'}",
+            reply_markup=admin_keyboard(),
+        )
+
+    elif data == "set_ad_text":
+        context.user_data["waiting_ad_text"] = True
+        await safe_edit(
+            q,
+            "✍️ Envoie maintenant le texte de la publicité.\n\n"
+            "Exemple : N’oubliez pas de partager le groupe ❤️",
             reply_markup=admin_keyboard(),
         )
 
@@ -465,17 +539,9 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             member = await context.bot.get_chat_member(GROUP_ID, context.bot.id)
 
             if member.status in ["administrator", "creator"]:
-                group_status = (
-                    f"✅ Branché au groupe\n"
-                    f"Nom : {chat.title}\n"
-                    f"Bot admin : ✅ Oui"
-                )
+                group_status = f"✅ Branché au groupe\nNom : {chat.title}\nBot admin : ✅ Oui"
             else:
-                group_status = (
-                    f"⚠️ Branché au groupe\n"
-                    f"Nom : {chat.title}\n"
-                    f"Bot admin : ❌ Non"
-                )
+                group_status = f"⚠️ Branché au groupe\nNom : {chat.title}\nBot admin : ❌ Non"
         except Exception as e:
             group_status = f"❌ Non branché\nErreur : {e}"
 
@@ -486,7 +552,8 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Groupe : {group_status}\n\n"
             f"GROUP_ID : {GROUP_ID}\n"
             f"Ouverture automatique : {'ON' if get_setting('auto_open') == '1' else 'OFF'}\n"
-            f"État groupe : {'Ouvert' if get_setting('group_open') == '1' else 'Fermé'}",
+            f"État groupe : {'Ouvert' if get_setting('group_open') == '1' else 'Fermé'}\n"
+            f"Publicité : {'ON' if get_setting('ad_enabled') == '1' else 'OFF'}",
             reply_markup=admin_keyboard(),
         )
 
@@ -526,7 +593,7 @@ async def delword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Mot interdit supprimé : {word}")
 
 
-async def do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+async def do_user_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     if not text.strip():
         await update.message.reply_text("❌ Message vide.")
         return
@@ -561,7 +628,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage : /broadcast ton message")
         return
 
-    await do_broadcast(update, context, text)
+    await do_user_broadcast(update, context, text)
 
 
 async def member_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -599,26 +666,30 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg:
         return
 
-    print(
-        f"MSG reçu | chat={msg.chat_id} | id={msg.message_id} | "
-        f"user={user.id if user else None} | "
-        f"is_bot={user.is_bot if user else None} | "
-        f"text={bool(msg.text)} | caption={bool(msg.caption)} | "
-        f"photo={bool(msg.photo)} | video={bool(msg.video)} | "
-        f"document={bool(msg.document)} | animation={bool(msg.animation)}"
-    )
-
     if msg.chat_id == GROUP_ID:
         await track_message(update)
 
     if not user:
         return
 
-    if is_admin(user.id) and context.user_data.get("waiting_broadcast"):
-        context.user_data["waiting_broadcast"] = False
-        await do_broadcast(update, context, msg.text or msg.caption or "")
+    if is_admin(user.id) and context.user_data.get("waiting_user_broadcast"):
+        context.user_data["waiting_user_broadcast"] = False
+        await do_user_broadcast(update, context, msg.text or msg.caption or "")
         return
 
+    if is_admin(user.id) and context.user_data.get("waiting_group_broadcast"):
+        context.user_data["waiting_group_broadcast"] = False
+        await send_group_broadcast(update, context, msg.text or msg.caption or "")
+        return
+
+    if is_admin(user.id) and context.user_data.get("waiting_ad_text"):
+        context.user_data["waiting_ad_text"] = False
+        set_setting("ad_text", msg.text or msg.caption or "")
+        set_setting("last_ad_at", "0")
+        await update.message.reply_text("✅ Texte publicité enregistré.")
+        return
+
+    # Les admins peuvent écrire tout le temps, même groupe fermé.
     if user.id in ADMIN_IDS:
         return
 
@@ -753,6 +824,7 @@ def main():
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, moderate_message))
 
     app.job_queue.run_repeating(schedule_checker, interval=60, first=5)
+    app.job_queue.run_repeating(ad_checker, interval=60, first=10)
 
     app.run_polling(
         allowed_updates=[

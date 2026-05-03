@@ -80,6 +80,13 @@ def init_db():
         """)
 
         conn.execute("""
+        CREATE TABLE IF NOT EXISTS trusted_usage (
+            user_id BIGINT,
+            used_at BIGINT
+        )
+        """)
+
+        conn.execute("""
         INSERT INTO settings(key, value) VALUES
         ('group_open', '0'),
         ('auto_open', '0'),
@@ -119,6 +126,39 @@ def is_admin(user_id: int) -> bool:
 
 def is_trusted(user_id: int) -> bool:
     return user_id in ADMIN_IDS or user_id in TRUSTED_IDS
+
+
+def trusted_can_use(user_id: int) -> bool:
+    now = int(time.time())
+    one_hour_ago = now - 3600
+
+    with db() as conn:
+        conn.execute(
+            "DELETE FROM trusted_usage WHERE used_at < %s",
+            (one_hour_ago,),
+        )
+
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM trusted_usage
+            WHERE user_id=%s AND used_at >= %s
+            """,
+            (user_id, one_hour_ago),
+        ).fetchone()
+
+        return row[0] < 5
+
+
+def record_trusted_use(user_id: int):
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO trusted_usage(user_id, used_at)
+            VALUES(%s, %s)
+            """,
+            (user_id, int(time.time())),
+        )
 
 
 def contains_slash_command(text: str) -> bool:
@@ -630,6 +670,14 @@ async def trusted_command_handler(update: Update, context: ContextTypes.DEFAULT_
         await mute_user(context, user.id, 7 * 24 * 3600, reason="commande slash non trusted")
         return
 
+    # Les admins ne sont pas limités. Les TRUSTED_IDS sont limités à 5 commandes / heure.
+    if user.id not in ADMIN_IDS:
+        if not trusted_can_use(user.id):
+            print(f"⚠️ Trusted limité : user={user.id}")
+            return
+
+        record_trusted_use(user.id)
+
     if not msg.reply_to_message or not msg.reply_to_message.from_user:
         return
 
@@ -997,10 +1045,8 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Groupe 0 : intercepte toutes les commandes /... dans le groupe.
     app.add_handler(MessageHandler(filters.COMMAND, trusted_command_handler), group=0)
 
-    # Commandes privées/admin normales.
     app.add_handler(CommandHandler("start", start), group=1)
     app.add_handler(CommandHandler("panel", panel), group=1)
     app.add_handler(CommandHandler("dbcount", dbcount), group=1)
@@ -1014,7 +1060,6 @@ def main():
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, member_updates), group=1)
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_updates), group=1)
 
-    # Messages normaux + commandes au milieu d’une phrase.
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, moderate_message), group=2)
 
     app.job_queue.run_repeating(schedule_checker, interval=60, first=5)

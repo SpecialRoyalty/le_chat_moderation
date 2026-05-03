@@ -13,6 +13,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ChatMemberHandler,
     ContextTypes,
     filters,
 )
@@ -87,6 +88,44 @@ def init_db():
         """)
 
         conn.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            user_id BIGINT PRIMARY KEY,
+            invite_link TEXT UNIQUE,
+            created_at BIGINT
+        )
+        """)
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS marketing_campaigns (
+            id SERIAL PRIMARY KEY,
+            text TEXT,
+            photo_file_id TEXT,
+            password TEXT,
+            created_at BIGINT,
+            sent_password BOOLEAN DEFAULT FALSE
+        )
+        """)
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS campaign_referrals (
+            campaign_id BIGINT,
+            referrer_id BIGINT,
+            joined_user_id BIGINT,
+            joined_at BIGINT,
+            PRIMARY KEY(campaign_id, joined_user_id)
+        )
+        """)
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS campaign_password_sent (
+            campaign_id BIGINT,
+            user_id BIGINT,
+            sent_at BIGINT,
+            PRIMARY KEY(campaign_id, user_id)
+        )
+        """)
+
+        conn.execute("""
         INSERT INTO settings(key, value) VALUES
         ('group_open', '0'),
         ('auto_open', '0'),
@@ -94,7 +133,8 @@ def init_db():
         ('closed_message_id', ''),
         ('ad_enabled', '0'),
         ('ad_text', ''),
-        ('last_ad_at', '0')
+        ('last_ad_at', '0'),
+        ('current_campaign_id', '')
         ON CONFLICT DO NOTHING
         """)
 
@@ -207,6 +247,12 @@ def admin_keyboard():
             InlineKeyboardButton("📣 Broadcast groupe", callback_data="broadcast_group")
         ],
         [
+            InlineKeyboardButton("🎯 Marketing", callback_data="marketing_start")
+        ],
+        [
+            InlineKeyboardButton("🔑 Envoyer MDP éligibles", callback_data="marketing_send_password")
+        ],
+        [
             InlineKeyboardButton(
                 f"📣 Publicité : {'ON' if ad == '1' else 'OFF'}",
                 callback_data="toggle_ad",
@@ -219,9 +265,9 @@ def admin_keyboard():
     ])
 
 
-async def safe_answer(q):
+async def safe_answer(q, text=None, show_alert=False):
     try:
-        await q.answer()
+        await q.answer(text=text, show_alert=show_alert)
     except Exception:
         pass
 
@@ -472,6 +518,165 @@ async def emergency(context: ContextTypes.DEFAULT_TYPE):
     await send_status_message(context, CLOSED_TEXT, "closed_message_id")
 
 
+async def get_or_create_referral_link(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    with db() as conn:
+        row = conn.execute(
+            "SELECT invite_link FROM referrals WHERE user_id=%s",
+            (user_id,),
+        ).fetchone()
+
+        if row and row[0]:
+            return row[0]
+
+    link = await context.bot.create_chat_invite_link(
+        chat_id=GROUP_ID,
+        name=f"ref_{user_id}",
+        creates_join_request=False,
+    )
+
+    invite_link = link.invite_link
+
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO referrals(user_id, invite_link, created_at)
+            VALUES(%s, %s, %s)
+            ON CONFLICT(user_id) DO UPDATE SET invite_link=EXCLUDED.invite_link
+            """,
+            (user_id, invite_link, int(time.time())),
+        )
+
+    return invite_link
+
+
+async def create_marketing_campaign(context: ContextTypes.DEFAULT_TYPE, text: str, photo_file_id: str, password: str):
+    with db() as conn:
+        row = conn.execute(
+            """
+            INSERT INTO marketing_campaigns(text, photo_file_id, password, created_at)
+            VALUES(%s, %s, %s, %s)
+            RETURNING id
+            """,
+            (text, photo_file_id, password, int(time.time())),
+        ).fetchone()
+
+    campaign_id = row[0]
+    set_setting("current_campaign_id", str(campaign_id))
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📤 Je partage", callback_data=f"share_campaign:{campaign_id}")
+        ],
+        [
+            InlineKeyboardButton("📊 Voir mon score", callback_data=f"score_campaign:{campaign_id}")
+        ],
+    ])
+
+    caption = text
+
+    if photo_file_id:
+        msg = await context.bot.send_photo(
+            GROUP_ID,
+            photo=photo_file_id,
+            caption=caption,
+            reply_markup=keyboard,
+        )
+    else:
+        msg = await context.bot.send_message(
+            GROUP_ID,
+            caption,
+            reply_markup=keyboard,
+        )
+
+    await track_message_by_id(GROUP_ID, msg.message_id, context.bot.id)
+    return campaign_id
+
+
+async def get_campaign_score(campaign_id: int, user_id: int) -> int:
+    with db() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM campaign_referrals
+            WHERE campaign_id=%s AND referrer_id=%s
+            """,
+            (campaign_id, user_id),
+        ).fetchone()
+        return row[0]
+
+
+async def send_password_to_eligibles(context: ContextTypes.DEFAULT_TYPE, campaign_id: int):
+    with db() as conn:
+        campaign = conn.execute(
+            """
+            SELECT password
+            FROM marketing_campaigns
+            WHERE id=%s
+            """,
+            (campaign_id,),
+        ).fetchone()
+
+        if not campaign:
+            return 0, 0, 0
+
+        password = campaign[0]
+
+        rows = conn.execute(
+            """
+            SELECT referrer_id, COUNT(*) AS total
+            FROM campaign_referrals
+            WHERE campaign_id=%s
+            GROUP BY referrer_id
+            HAVING COUNT(*) >= 10
+            """,
+            (campaign_id,),
+        ).fetchall()
+
+    sent = 0
+    failed = 0
+    already = 0
+
+    for user_id, total in rows:
+        with db() as conn:
+            exists = conn.execute(
+                """
+                SELECT 1
+                FROM campaign_password_sent
+                WHERE campaign_id=%s AND user_id=%s
+                """,
+                (campaign_id, user_id),
+            ).fetchone()
+
+        if exists:
+            already += 1
+            continue
+
+        try:
+            await context.bot.send_message(
+                user_id,
+                f"🎉 Tu es éligible.\n\nVoici le mot de passe :\n\n{password}"
+            )
+
+            with db() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO campaign_password_sent(campaign_id, user_id, sent_at)
+                    VALUES(%s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (campaign_id, user_id, int(time.time())),
+                )
+
+            sent += 1
+            await asyncio.sleep(0.05)
+
+        except Exception as e:
+            failed += 1
+            print(f"❌ Impossible envoyer MDP user={user_id} | {e}")
+
+    return sent, failed, already
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
@@ -709,10 +914,57 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await safe_answer(q)
 
-    if not is_admin(q.from_user.id):
+    user_id = q.from_user.id
+    data = q.data
+
+    if data.startswith("share_campaign:"):
+        campaign_id = int(data.split(":")[1])
+
+        with db() as conn:
+            conn.execute(
+                """
+                INSERT INTO users(user_id, username, first_name, created_at)
+                VALUES(%s, %s, %s, %s)
+                ON CONFLICT(user_id) DO UPDATE SET
+                username=EXCLUDED.username,
+                first_name=EXCLUDED.first_name
+                """,
+                (q.from_user.id, q.from_user.username, q.from_user.first_name, int(time.time())),
+            )
+
+        try:
+            link = await get_or_create_referral_link(context, user_id)
+            score = await get_campaign_score(campaign_id, user_id)
+
+            try:
+                await context.bot.send_message(
+                    user_id,
+                    f"📤 Ton lien unique :\n{link}\n\n"
+                    f"📊 Score pour cette campagne : {score}/10\n\n"
+                    f"Ramène 10 personnes pour recevoir le code."
+                )
+                await safe_answer(q, "Lien envoyé en privé ✅")
+            except Exception:
+                await safe_answer(
+                    q,
+                    "Ouvre le bot en privé avec /start pour recevoir ton lien.",
+                    show_alert=True,
+                )
+
+        except Exception as e:
+            print(f"❌ Erreur génération lien user={user_id} | {e}")
+            await safe_answer(q, "Erreur : impossible de générer le lien.", show_alert=True)
+
         return
 
-    data = q.data
+    if data.startswith("score_campaign:"):
+        campaign_id = int(data.split(":")[1])
+        score = await get_campaign_score(campaign_id, user_id)
+        await safe_answer(q, f"📊 Ton score : {score}/10", show_alert=True)
+        return
+
+    if not is_admin(user_id):
+        return
 
     if data == "toggle_auto":
         current = get_setting("auto_open", "0")
@@ -787,6 +1039,46 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=admin_keyboard(),
         )
 
+    elif data == "marketing_start":
+        context.user_data["waiting_marketing_text"] = True
+        context.user_data.pop("marketing_text", None)
+        context.user_data.pop("marketing_photo", None)
+        context.user_data.pop("marketing_password", None)
+
+        await safe_edit(
+            q,
+            "🎯 Marketing\n\nEnvoie le texte de la campagne.",
+            reply_markup=admin_keyboard(),
+        )
+
+    elif data == "marketing_send_password":
+        current_id = get_setting("current_campaign_id", "")
+        if not current_id:
+            await safe_edit(
+                q,
+                "❌ Aucune campagne marketing active.",
+                reply_markup=admin_keyboard(),
+            )
+            return
+
+        await safe_edit(
+            q,
+            "🔑 Envoi du mot de passe lancé.\n\nLe bot contacte les éligibles en arrière-plan.",
+            reply_markup=admin_keyboard(),
+        )
+
+        async def bg_send():
+            sent, failed, already = await send_password_to_eligibles(context, int(current_id))
+            try:
+                await context.bot.send_message(
+                    user_id,
+                    f"🔑 Envoi terminé.\n\n✅ Envoyés : {sent}\n❌ Échecs : {failed}\nℹ️ Déjà envoyés : {already}"
+                )
+            except Exception:
+                pass
+
+        context.application.create_task(bg_send())
+
     elif data == "toggle_ad":
         current = get_setting("ad_enabled", "0")
         new_value = "0" if current == "1" else "1"
@@ -839,7 +1131,8 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Trusted : {len(TRUSTED_IDS)}\n"
             f"Ouverture automatique : {'ON' if get_setting('auto_open') == '1' else 'OFF'}\n"
             f"État groupe : {'Ouvert' if get_setting('group_open') == '1' else 'Fermé'}\n"
-            f"Publicité : {'ON' if get_setting('ad_enabled') == '1' else 'OFF'}",
+            f"Publicité : {'ON' if get_setting('ad_enabled') == '1' else 'OFF'}\n"
+            f"Campagne actuelle : {get_setting('current_campaign_id', 'aucune')}",
             reply_markup=admin_keyboard(),
         )
 
@@ -924,6 +1217,79 @@ async def member_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"❌ Impossible supprimer entrée/sortie {msg.message_id} | {e}")
 
 
+async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cmu = update.chat_member
+
+    if not cmu or cmu.chat.id != GROUP_ID:
+        return
+
+    old_status = cmu.old_chat_member.status
+    new_status = cmu.new_chat_member.status
+    joined_user = cmu.new_chat_member.user
+
+    joined = old_status in ["left", "kicked"] and new_status in [
+        "member",
+        "restricted",
+        "administrator",
+    ]
+
+    if not joined:
+        return
+
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO joined_users(user_id, joined_at)
+            VALUES(%s, %s)
+            ON CONFLICT(user_id) DO UPDATE SET joined_at=EXCLUDED.joined_at
+            """,
+            (joined_user.id, int(time.time())),
+        )
+
+    invite_link_obj = cmu.invite_link
+    if not invite_link_obj:
+        return
+
+    invite_link = invite_link_obj.invite_link
+    current_campaign_id = get_setting("current_campaign_id", "")
+
+    if not current_campaign_id:
+        return
+
+    with db() as conn:
+        ref = conn.execute(
+            """
+            SELECT user_id
+            FROM referrals
+            WHERE invite_link=%s
+            """,
+            (invite_link,),
+        ).fetchone()
+
+    if not ref:
+        return
+
+    referrer_id = ref[0]
+
+    if referrer_id == joined_user.id:
+        return
+
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO campaign_referrals(campaign_id, referrer_id, joined_user_id, joined_at)
+            VALUES(%s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            (int(current_campaign_id), referrer_id, joined_user.id, int(time.time())),
+        )
+
+    print(
+        f"✅ Referral campagne={current_campaign_id} "
+        f"referrer={referrer_id} joined={joined_user.id}"
+    )
+
+
 async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     user = update.effective_user
@@ -954,17 +1320,54 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Texte publicité enregistré.")
         return
 
+    if is_admin(user.id) and context.user_data.get("waiting_marketing_text"):
+        context.user_data["waiting_marketing_text"] = False
+        context.user_data["marketing_text"] = msg.text or msg.caption or ""
+        context.user_data["waiting_marketing_photo"] = True
+
+        await update.message.reply_text(
+            "✅ Texte enregistré.\n\nEnvoie maintenant la photo de la campagne."
+        )
+        return
+
+    if is_admin(user.id) and context.user_data.get("waiting_marketing_photo"):
+        if not msg.photo:
+            await update.message.reply_text("❌ Envoie une photo.")
+            return
+
+        context.user_data["waiting_marketing_photo"] = False
+        context.user_data["marketing_photo"] = msg.photo[-1].file_id
+        context.user_data["waiting_marketing_password"] = True
+
+        await update.message.reply_text(
+            "✅ Photo enregistrée.\n\nEnvoie maintenant le mot de passe à envoyer aux éligibles."
+        )
+        return
+
+    if is_admin(user.id) and context.user_data.get("waiting_marketing_password"):
+        context.user_data["waiting_marketing_password"] = False
+        context.user_data["marketing_password"] = msg.text or msg.caption or ""
+
+        text = context.user_data.get("marketing_text", "")
+        photo = context.user_data.get("marketing_photo", "")
+        password = context.user_data.get("marketing_password", "")
+
+        campaign_id = await create_marketing_campaign(context, text, photo, password)
+
+        await update.message.reply_text(
+            f"✅ Campagne marketing publiée.\n\nID campagne : {campaign_id}"
+        )
+        return
+
     if user.id in ADMIN_IDS:
         return
 
     text = msg.text or msg.caption or ""
 
-    # /telecharge, /ban, /supprime, et toutes commandes slash
     if msg.chat_id == GROUP_ID and contains_slash_command(text):
         await trusted_command_handler(update, context)
         return
 
-    # Tous les liens sont interdits pour les non-admins
     if msg.chat_id == GROUP_ID and contains_link(text):
         try:
             await msg.delete()
@@ -1098,6 +1501,8 @@ def main():
     app.add_handler(CommandHandler("broadcast", broadcast_command), group=1)
 
     app.add_handler(CallbackQueryHandler(callbacks), group=1)
+
+    app.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.CHAT_MEMBER), group=1)
 
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, member_updates), group=1)
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_updates), group=1)

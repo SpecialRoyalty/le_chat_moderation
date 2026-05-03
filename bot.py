@@ -572,19 +572,17 @@ async def create_marketing_campaign(context: ContextTypes.DEFAULT_TYPE, text: st
         ],
     ])
 
-    caption = text
-
     if photo_file_id:
         msg = await context.bot.send_photo(
             GROUP_ID,
             photo=photo_file_id,
-            caption=caption,
+            caption=text,
             reply_markup=keyboard,
         )
     else:
         msg = await context.bot.send_message(
             GROUP_ID,
-            caption,
+            text,
             reply_markup=keyboard,
         )
 
@@ -1284,9 +1282,20 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
             (int(current_campaign_id), referrer_id, joined_user.id, int(time.time())),
         )
 
+    score = await get_campaign_score(int(current_campaign_id), referrer_id)
+
+    try:
+        await context.bot.send_message(
+            referrer_id,
+            f"✅ Quelqu’un vient de rejoindre avec ton lien.\n\n"
+            f"📊 Score campagne : {score}/10"
+        )
+    except Exception as e:
+        print(f"❌ Impossible notifier referrer={referrer_id} | {e}")
+
     print(
         f"✅ Referral campagne={current_campaign_id} "
-        f"referrer={referrer_id} joined={joined_user.id}"
+        f"referrer={referrer_id} joined={joined_user.id} score={score}"
     )
 
 

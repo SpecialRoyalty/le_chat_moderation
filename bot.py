@@ -20,7 +20,9 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 GROUP_ID = int(os.getenv("GROUP_ID"))
+
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x}
+TRUSTED_IDS = {int(x) for x in os.getenv("TRUSTED_IDS", "").split(",") if x}
 
 TZ = ZoneInfo("Europe/Paris")
 
@@ -45,8 +47,14 @@ def init_db():
         CREATE TABLE IF NOT EXISTS tracked_messages (
             chat_id BIGINT,
             message_id BIGINT,
+            user_id BIGINT,
             created_at BIGINT
         )
+        """)
+
+        conn.execute("""
+        ALTER TABLE tracked_messages
+        ADD COLUMN IF NOT EXISTS user_id BIGINT
         """)
 
         conn.execute("""
@@ -107,6 +115,19 @@ def set_setting(key, value):
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
+
+
+def is_trusted(user_id: int) -> bool:
+    return user_id in ADMIN_IDS or user_id in TRUSTED_IDS
+
+
+def contains_slash_command(text: str) -> bool:
+    return bool(re.search(r"(^|\s)/[a-zA-Z0-9_]+", text or ""))
+
+
+def extract_slash_command(text: str) -> str:
+    match = re.search(r"(^|\s)/[a-zA-Z0-9_]+", text or "")
+    return match.group(0).strip().lower() if match else ""
 
 
 def admin_keyboard():
@@ -170,14 +191,14 @@ async def safe_edit(q, text, reply_markup=None):
         pass
 
 
-async def track_message_by_id(chat_id: int, message_id: int):
+async def track_message_by_id(chat_id: int, message_id: int, user_id=None):
     with db() as conn:
         conn.execute(
             """
-            INSERT INTO tracked_messages(chat_id, message_id, created_at)
-            VALUES(%s, %s, %s)
+            INSERT INTO tracked_messages(chat_id, message_id, user_id, created_at)
+            VALUES(%s, %s, %s, %s)
             """,
-            (chat_id, message_id, int(time.time())),
+            (chat_id, message_id, user_id, int(time.time())),
         )
 
 
@@ -188,7 +209,13 @@ async def track_message(update: Update):
     if update.message.chat_id != GROUP_ID:
         return
 
-    await track_message_by_id(update.message.chat_id, update.message.message_id)
+    user = update.effective_user
+
+    await track_message_by_id(
+        update.message.chat_id,
+        update.message.message_id,
+        user.id if user else None,
+    )
 
 
 def remove_tracked_message(chat_id, message_id):
@@ -200,6 +227,52 @@ def remove_tracked_message(chat_id, message_id):
             """,
             (chat_id, message_id),
         )
+
+
+async def mute_user(context, user_id, seconds, reason=""):
+    try:
+        await context.bot.restrict_chat_member(
+            GROUP_ID,
+            user_id,
+            ChatPermissions(can_send_messages=False),
+            until_date=int(time.time() + seconds),
+        )
+        print(f"✅ User muté user={user_id} raison={reason}")
+    except Exception as e:
+        print(f"❌ Impossible mute user={user_id} raison={reason} | {e}")
+
+
+async def delete_user_messages(context, target_user_id):
+    with db() as conn:
+        rows = conn.execute(
+            """
+            SELECT chat_id, message_id
+            FROM tracked_messages
+            WHERE chat_id=%s AND user_id=%s
+            ORDER BY message_id DESC
+            """,
+            (GROUP_ID, target_user_id),
+        ).fetchall()
+
+    deleted = 0
+
+    for chat_id, message_id in rows:
+        try:
+            await context.bot.delete_message(chat_id, message_id)
+            remove_tracked_message(chat_id, message_id)
+            deleted += 1
+            await asyncio.sleep(0.05)
+
+        except BadRequest as e:
+            if "not found" in str(e).lower():
+                remove_tracked_message(chat_id, message_id)
+            else:
+                print(f"❌ Delete user msg BadRequest id={message_id} | {e}")
+
+        except Exception as e:
+            print(f"❌ Delete user msg id={message_id} | {e}")
+
+    return deleted
 
 
 async def delete_later(context: ContextTypes.DEFAULT_TYPE):
@@ -239,18 +312,15 @@ async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.delete_message(chat_id, message_id)
                 remove_tracked_message(chat_id, message_id)
                 deleted += 1
-                print(f"✅ Supprimé : {message_id}")
                 await asyncio.sleep(0.06)
 
             except RetryAfter as e:
-                print(f"⏳ Rate limit {message_id}, attente {e.retry_after}s")
                 await asyncio.sleep(e.retry_after + 1)
 
                 try:
                     await context.bot.delete_message(chat_id, message_id)
                     remove_tracked_message(chat_id, message_id)
                     deleted += 1
-                    print(f"✅ Supprimé après attente : {message_id}")
                 except Exception as retry_error:
                     failed += 1
                     print(f"❌ Échec après attente {message_id} | {retry_error}")
@@ -261,7 +331,6 @@ async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
                 if "not found" in err or "message to delete not found" in err:
                     remove_tracked_message(chat_id, message_id)
                     already_gone += 1
-                    print(f"ℹ️ Déjà supprimé / introuvable : {message_id}")
                 else:
                     failed += 1
                     print(f"❌ BadRequest {message_id} | {e}")
@@ -297,7 +366,6 @@ async def send_status_message(context: ContextTypes.DEFAULT_TYPE, text: str, set
             try:
                 await context.bot.delete_message(GROUP_ID, int(old_id))
                 remove_tracked_message(GROUP_ID, int(old_id))
-                print(f"✅ Ancien message d’état supprimé : {old_id}")
             except Exception as e:
                 print(f"❌ Impossible supprimer ancien état {old_id} | {e}")
 
@@ -306,7 +374,7 @@ async def send_status_message(context: ContextTypes.DEFAULT_TYPE, text: str, set
 
     msg = await context.bot.send_message(GROUP_ID, text)
     set_setting(setting_key, str(msg.message_id))
-    await track_message_by_id(GROUP_ID, msg.message_id)
+    await track_message_by_id(GROUP_ID, msg.message_id, context.bot.id)
 
     print(f"📌 Nouveau message d’état : {msg.message_id}")
 
@@ -358,6 +426,9 @@ async def emergency(context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+
+    if update.effective_chat and update.effective_chat.id == GROUP_ID:
+        return
 
     with db() as conn:
         conn.execute(
@@ -446,7 +517,7 @@ async def send_group_broadcast(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     msg = await context.bot.send_message(GROUP_ID, text)
-    await track_message_by_id(GROUP_ID, msg.message_id)
+    await track_message_by_id(GROUP_ID, msg.message_id, context.bot.id)
 
     context.job_queue.run_once(
         delete_later,
@@ -475,7 +546,7 @@ async def ad_checker(context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = await context.bot.send_message(GROUP_ID, ad_text)
-    await track_message_by_id(GROUP_ID, msg.message_id)
+    await track_message_by_id(GROUP_ID, msg.message_id, context.bot.id)
 
     set_setting("last_ad_at", str(now))
 
@@ -524,6 +595,59 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await do_user_broadcast(update, context, text)
+
+
+async def trusted_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    user = update.effective_user
+
+    if not msg or not user or msg.chat_id != GROUP_ID:
+        return
+
+    text = msg.text or msg.caption or ""
+    command = extract_slash_command(text)
+
+    if not command:
+        return
+
+    await track_message(update)
+
+    try:
+        await msg.delete()
+        remove_tracked_message(msg.chat_id, msg.message_id)
+    except Exception:
+        pass
+
+    if command == "/telecharge":
+        return
+
+    if command not in ["/supprime", "/ban"]:
+        if not is_trusted(user.id):
+            await mute_user(context, user.id, 7 * 24 * 3600, reason="commande slash")
+        return
+
+    if not is_trusted(user.id):
+        await mute_user(context, user.id, 7 * 24 * 3600, reason="commande slash non trusted")
+        return
+
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        return
+
+    target = msg.reply_to_message.from_user
+
+    await delete_user_messages(context, target.id)
+
+    try:
+        await msg.reply_to_message.delete()
+    except Exception:
+        pass
+
+    if command == "/ban":
+        try:
+            await context.bot.ban_chat_member(GROUP_ID, target.id)
+            print(f"✅ Ban user={target.id}")
+        except Exception as e:
+            print(f"❌ Impossible ban user={target.id} | {e}")
 
 
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -656,6 +780,8 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Base de données : {db_status}\n\n"
             f"Groupe : {group_status}\n\n"
             f"GROUP_ID : {GROUP_ID}\n"
+            f"Admins : {len(ADMIN_IDS)}\n"
+            f"Trusted : {len(TRUSTED_IDS)}\n"
             f"Ouverture automatique : {'ON' if get_setting('auto_open') == '1' else 'OFF'}\n"
             f"État groupe : {'Ouvert' if get_setting('group_open') == '1' else 'Fermé'}\n"
             f"Publicité : {'ON' if get_setting('ad_enabled') == '1' else 'OFF'}",
@@ -722,22 +848,8 @@ async def member_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await msg.delete()
         remove_tracked_message(msg.chat_id, msg.message_id)
-        print(f"✅ Message entrée/sortie supprimé : {msg.message_id}")
     except Exception as e:
         print(f"❌ Impossible supprimer entrée/sortie {msg.message_id} | {e}")
-
-
-async def mute_user(context, user_id, seconds, reason=""):
-    try:
-        await context.bot.restrict_chat_member(
-            GROUP_ID,
-            user_id,
-            ChatPermissions(can_send_messages=False),
-            until_date=int(time.time() + seconds),
-        )
-        print(f"✅ User muté {seconds}s user={user_id} raison={reason}")
-    except Exception as e:
-        print(f"❌ Impossible mute user={user_id} raison={reason} | {e}")
 
 
 async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -770,27 +882,13 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Texte publicité enregistré.")
         return
 
-    # Les admins peuvent écrire tout le temps, même groupe fermé.
     if user.id in ADMIN_IDS:
         return
 
     text = msg.text or msg.caption or ""
 
-    # Toute commande /... dans le groupe = mute 1 semaine
-    if msg.chat_id == GROUP_ID and text.startswith("/"):
-        try:
-            await msg.delete()
-            remove_tracked_message(msg.chat_id, msg.message_id)
-            print(f"✅ Commande supprimée : {msg.message_id}")
-        except Exception as e:
-            print(f"❌ Impossible supprimer commande {msg.message_id} | {e}")
-
-        await mute_user(
-            context,
-            user.id,
-            7 * 24 * 3600,
-            reason="commande slash",
-        )
+    if msg.chat_id == GROUP_ID and contains_slash_command(text):
+        await trusted_command_handler(update, context)
         return
 
     if msg.new_chat_members or msg.left_chat_member:
@@ -805,7 +903,6 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await msg.delete()
             remove_tracked_message(msg.chat_id, msg.message_id)
-            print(f"✅ Message supprimé car groupe fermé : {msg.message_id}")
         except Exception as e:
             print(f"❌ Impossible supprimer message groupe fermé {msg.message_id} | {e}")
 
@@ -830,7 +927,6 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await msg.delete()
             remove_tracked_message(msg.chat_id, msg.message_id)
-            print(f"✅ Spam nouveau membre supprimé : {msg.message_id}")
         except Exception as e:
             print(f"❌ Impossible supprimer spam nouveau membre {msg.message_id} | {e}")
 
@@ -846,7 +942,6 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await msg.delete()
             remove_tracked_message(msg.chat_id, msg.message_id)
-            print(f"✅ Message langue interdite supprimé : {msg.message_id}")
         except Exception as e:
             print(f"❌ Impossible supprimer langue interdite {msg.message_id} | {e}")
 
@@ -862,13 +957,15 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if lowered:
         with db() as conn:
-            words = [r[0] for r in conn.execute("SELECT word FROM banned_words").fetchall()]
+            words = [
+                r[0]
+                for r in conn.execute("SELECT word FROM banned_words").fetchall()
+            ]
 
         if any(word in lowered for word in words):
             try:
                 await msg.delete()
                 remove_tracked_message(msg.chat_id, msg.message_id)
-                print(f"✅ Mot interdit supprimé : {msg.message_id}")
             except Exception as e:
                 print(f"❌ Impossible supprimer mot interdit {msg.message_id} | {e}")
 
@@ -900,20 +997,25 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("panel", panel))
-    app.add_handler(CommandHandler("dbcount", dbcount))
-    app.add_handler(CommandHandler("testdelete", testdelete))
-    app.add_handler(CommandHandler("addword", addword))
-    app.add_handler(CommandHandler("delword", delword))
-    app.add_handler(CommandHandler("broadcast", broadcast_command))
+    # Groupe 0 : intercepte toutes les commandes /... dans le groupe.
+    app.add_handler(MessageHandler(filters.COMMAND, trusted_command_handler), group=0)
 
-    app.add_handler(CallbackQueryHandler(callbacks))
+    # Commandes privées/admin normales.
+    app.add_handler(CommandHandler("start", start), group=1)
+    app.add_handler(CommandHandler("panel", panel), group=1)
+    app.add_handler(CommandHandler("dbcount", dbcount), group=1)
+    app.add_handler(CommandHandler("testdelete", testdelete), group=1)
+    app.add_handler(CommandHandler("addword", addword), group=1)
+    app.add_handler(CommandHandler("delword", delword), group=1)
+    app.add_handler(CommandHandler("broadcast", broadcast_command), group=1)
 
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, member_updates))
-    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_updates))
+    app.add_handler(CallbackQueryHandler(callbacks), group=1)
 
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, moderate_message))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, member_updates), group=1)
+    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, member_updates), group=1)
+
+    # Messages normaux + commandes au milieu d’une phrase.
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, moderate_message), group=2)
 
     app.job_queue.run_repeating(schedule_checker, interval=60, first=5)
     app.job_queue.run_repeating(ad_checker, interval=60, first=10)

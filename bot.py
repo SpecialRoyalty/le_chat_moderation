@@ -170,6 +170,14 @@ def extract_slash_command(text: str) -> str:
     return match.group(0).strip().lower() if match else ""
 
 
+def contains_link(text: str) -> bool:
+    return bool(re.search(
+        r"(https?://|www\.|t\.me/|telegram\.me/)",
+        text or "",
+        re.IGNORECASE
+    ))
+
+
 def admin_keyboard():
     auto = get_setting("auto_open", "0")
     ad = get_setting("ad_enabled", "0")
@@ -670,7 +678,6 @@ async def trusted_command_handler(update: Update, context: ContextTypes.DEFAULT_
         await mute_user(context, user.id, 7 * 24 * 3600, reason="commande slash non trusted")
         return
 
-    # Les admins ne sont pas limités. Les TRUSTED_IDS sont limités à 5 commandes / heure.
     if user.id not in ADMIN_IDS:
         if not trusted_can_use(user.id):
             print(f"⚠️ Trusted limité : user={user.id}")
@@ -878,11 +885,13 @@ async def member_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg:
         return
 
+    inviter = msg.from_user
+
     if msg.chat_id == GROUP_ID:
         await track_message(update)
 
     if msg.new_chat_members:
-        for user in msg.new_chat_members:
+        for new_user in msg.new_chat_members:
             with db() as conn:
                 conn.execute(
                     """
@@ -890,8 +899,23 @@ async def member_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     VALUES(%s, %s)
                     ON CONFLICT(user_id) DO UPDATE SET joined_at=EXCLUDED.joined_at
                     """,
-                    (user.id, int(time.time())),
+                    (new_user.id, int(time.time())),
                 )
+
+            if new_user.is_bot and new_user.id != context.bot.id:
+                try:
+                    await context.bot.ban_chat_member(GROUP_ID, new_user.id)
+                    print(f"🤖 Bot ajouté puis banni : {new_user.id}")
+                except Exception as e:
+                    print(f"❌ Impossible ban bot ajouté {new_user.id} | {e}")
+
+                if inviter and not is_admin(inviter.id):
+                    await mute_user(
+                        context,
+                        inviter.id,
+                        7 * 24 * 3600,
+                        reason="ajout bot",
+                    )
 
     try:
         await msg.delete()
@@ -935,8 +959,26 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = msg.text or msg.caption or ""
 
+    # /telecharge, /ban, /supprime, et toutes commandes slash
     if msg.chat_id == GROUP_ID and contains_slash_command(text):
         await trusted_command_handler(update, context)
+        return
+
+    # Tous les liens sont interdits pour les non-admins
+    if msg.chat_id == GROUP_ID and contains_link(text):
+        try:
+            await msg.delete()
+            remove_tracked_message(msg.chat_id, msg.message_id)
+            print(f"🔗 Lien supprimé : {msg.message_id}")
+        except Exception as e:
+            print(f"❌ Impossible supprimer lien {msg.message_id} | {e}")
+
+        await mute_user(
+            context,
+            user.id,
+            7 * 24 * 3600,
+            reason="lien interdit",
+        )
         return
 
     if msg.new_chat_members or msg.left_chat_member:

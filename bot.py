@@ -30,6 +30,9 @@ TZ = ZoneInfo("Europe/Paris")
 OPEN_TEXT = "💚 Groupe ouvert, vous pouvez envoyer vos médias <3"
 CLOSED_TEXT = "🔒 Groupe fermé. Les messages ne sont pas autorisés pour le moment."
 
+REFERRAL_GOAL = 10
+REFERRAL_VALIDATION_SECONDS = 300
+
 
 def db():
     return psycopg.connect(DATABASE_URL)
@@ -141,10 +144,7 @@ def init_db():
 
 def get_setting(key, default=""):
     with db() as conn:
-        row = conn.execute(
-            "SELECT value FROM settings WHERE key=%s",
-            (key,),
-        ).fetchone()
+        row = conn.execute("SELECT value FROM settings WHERE key=%s", (key,)).fetchone()
         return row[0] if row else default
 
 
@@ -173,11 +173,7 @@ def trusted_can_use(user_id: int) -> bool:
     one_hour_ago = now - 3600
 
     with db() as conn:
-        conn.execute(
-            "DELETE FROM trusted_usage WHERE used_at < %s",
-            (one_hour_ago,),
-        )
-
+        conn.execute("DELETE FROM trusted_usage WHERE used_at < %s", (one_hour_ago,))
         row = conn.execute(
             """
             SELECT COUNT(*)
@@ -223,46 +219,41 @@ def admin_keyboard():
     ad = get_setting("ad_enabled", "0")
 
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                f"Ouverture automatique : {'ON' if auto == '1' else 'OFF'}",
-                callback_data="toggle_auto",
-            )
-        ],
+        [InlineKeyboardButton(f"Ouverture automatique : {'ON' if auto == '1' else 'OFF'}", callback_data="toggle_auto")],
         [
             InlineKeyboardButton("✅ Ouvrir maintenant", callback_data="open_now"),
             InlineKeyboardButton("🔒 Fermer maintenant", callback_data="close_now"),
         ],
-        [
-            InlineKeyboardButton("🚨 Urgence : tout supprimer", callback_data="emergency")
-        ],
+        [InlineKeyboardButton("🚨 Urgence : tout supprimer", callback_data="emergency")],
         [
             InlineKeyboardButton("➕ Ajouter mot interdit", callback_data="add_word"),
             InlineKeyboardButton("📋 Voir mots interdits", callback_data="list_words"),
         ],
+        [InlineKeyboardButton("📢 Broadcast utilisateurs", callback_data="broadcast_users")],
+        [InlineKeyboardButton("📣 Broadcast groupe", callback_data="broadcast_group")],
+        [InlineKeyboardButton("🎯 Marketing", callback_data="marketing_menu")],
         [
-            InlineKeyboardButton("📢 Broadcast utilisateurs", callback_data="broadcast_users")
-        ],
-        [
-            InlineKeyboardButton("📣 Broadcast groupe", callback_data="broadcast_group")
-        ],
-        [
-            InlineKeyboardButton("🎯 Marketing", callback_data="marketing_start")
-        ],
-        [
-            InlineKeyboardButton("🔑 Envoyer MDP éligibles", callback_data="marketing_send_password")
-        ],
-        [
-            InlineKeyboardButton(
-                f"📣 Publicité : {'ON' if ad == '1' else 'OFF'}",
-                callback_data="toggle_ad",
-            ),
+            InlineKeyboardButton(f"📣 Publicité : {'ON' if ad == '1' else 'OFF'}", callback_data="toggle_ad"),
             InlineKeyboardButton("✍️ Texte pub", callback_data="set_ad_text"),
         ],
-        [
-            InlineKeyboardButton("ℹ️ Info", callback_data="info")
-        ],
+        [InlineKeyboardButton("ℹ️ Info", callback_data="info")],
     ])
+
+
+def marketing_keyboard():
+    current_id = get_setting("current_campaign_id", "")
+
+    rows = [[InlineKeyboardButton("➕ Créer marketing", callback_data="marketing_create")]]
+
+    if current_id:
+        rows += [
+            [InlineKeyboardButton("🔁 Republier marketing actuel", callback_data="marketing_repost")],
+            [InlineKeyboardButton("🔑 Modifier mot de passe", callback_data="marketing_edit_password")],
+            [InlineKeyboardButton("📊 Statut marketing actuel", callback_data="marketing_status")],
+        ]
+
+    rows.append([InlineKeyboardButton("⬅️ Retour panel", callback_data="back_admin")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def safe_answer(q, text=None, show_alert=False):
@@ -304,7 +295,6 @@ async def track_message(update: Update):
         return
 
     user = update.effective_user
-
     await track_message_by_id(
         update.message.chat_id,
         update.message.message_id,
@@ -356,13 +346,11 @@ async def delete_user_messages(context, target_user_id):
             remove_tracked_message(chat_id, message_id)
             deleted += 1
             await asyncio.sleep(0.05)
-
         except BadRequest as e:
             if "not found" in str(e).lower():
                 remove_tracked_message(chat_id, message_id)
             else:
                 print(f"❌ Delete user msg BadRequest id={message_id} | {e}")
-
         except Exception as e:
             print(f"❌ Delete user msg id={message_id} | {e}")
 
@@ -410,7 +398,6 @@ async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
 
             except RetryAfter as e:
                 await asyncio.sleep(e.retry_after + 1)
-
                 try:
                     await context.bot.delete_message(chat_id, message_id)
                     remove_tracked_message(chat_id, message_id)
@@ -421,14 +408,12 @@ async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
 
             except BadRequest as e:
                 err = str(e).lower()
-
                 if "not found" in err or "message to delete not found" in err:
                     remove_tracked_message(chat_id, message_id)
                     already_gone += 1
                 else:
                     failed += 1
                     print(f"❌ BadRequest {message_id} | {e}")
-
                 await asyncio.sleep(0.05)
 
             except (TimedOut, NetworkError) as e:
@@ -441,10 +426,7 @@ async def delete_all_tracked(context: ContextTypes.DEFAULT_TYPE):
                 print(f"❌ Échec {message_id} | {type(e).__name__}: {e}")
                 await asyncio.sleep(0.08)
 
-        print(
-            f"{pass_name} terminé : "
-            f"{deleted} supprimés, {already_gone} déjà absents, {failed} vrais échecs"
-        )
+        print(f"{pass_name} terminé : {deleted} supprimés, {already_gone} déjà absents, {failed} vrais échecs")
 
     await delete_pass("PASS 1")
     await asyncio.sleep(3)
@@ -487,44 +469,30 @@ async def open_group(context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.set_chat_permissions(GROUP_ID, perms)
     set_setting("group_open", "1")
-
     await send_status_message(context, OPEN_TEXT, "open_message_id")
 
 
 async def close_group(context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.set_chat_permissions(
-        GROUP_ID,
-        ChatPermissions(can_send_messages=False),
-    )
-
+    await context.bot.set_chat_permissions(GROUP_ID, ChatPermissions(can_send_messages=False))
     set_setting("group_open", "0")
-
     await delete_all_tracked(context)
     await send_status_message(context, CLOSED_TEXT, "closed_message_id")
 
 
 async def emergency(context: ContextTypes.DEFAULT_TYPE):
     try:
-        await context.bot.set_chat_permissions(
-            GROUP_ID,
-            ChatPermissions(can_send_messages=False),
-        )
+        await context.bot.set_chat_permissions(GROUP_ID, ChatPermissions(can_send_messages=False))
     except Exception as e:
         print(f"❌ Erreur fermeture urgence : {e}")
 
     set_setting("group_open", "0")
-
     await delete_all_tracked(context)
     await send_status_message(context, CLOSED_TEXT, "closed_message_id")
 
 
 async def get_or_create_referral_link(context: ContextTypes.DEFAULT_TYPE, user_id: int):
     with db() as conn:
-        row = conn.execute(
-            "SELECT invite_link FROM referrals WHERE user_id=%s",
-            (user_id,),
-        ).fetchone()
-
+        row = conn.execute("SELECT invite_link FROM referrals WHERE user_id=%s", (user_id,)).fetchone()
         if row and row[0]:
             return row[0]
 
@@ -562,14 +530,29 @@ async def create_marketing_campaign(context: ContextTypes.DEFAULT_TYPE, text: st
 
     campaign_id = row[0]
     set_setting("current_campaign_id", str(campaign_id))
+    await publish_marketing_campaign(context, campaign_id)
+    return campaign_id
+
+
+async def publish_marketing_campaign(context: ContextTypes.DEFAULT_TYPE, campaign_id: int):
+    with db() as conn:
+        row = conn.execute(
+            """
+            SELECT text, photo_file_id
+            FROM marketing_campaigns
+            WHERE id=%s
+            """,
+            (campaign_id,),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    text, photo_file_id = row
 
     keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📤 Je partage", callback_data=f"share_campaign:{campaign_id}")
-        ],
-        [
-            InlineKeyboardButton("📊 Voir mon score", callback_data=f"score_campaign:{campaign_id}")
-        ],
+        [InlineKeyboardButton("📤 Je partage", callback_data=f"share_campaign:{campaign_id}")],
+        [InlineKeyboardButton("📊 Voir mon score", callback_data=f"score_campaign:{campaign_id}")],
     ])
 
     if photo_file_id:
@@ -580,14 +563,10 @@ async def create_marketing_campaign(context: ContextTypes.DEFAULT_TYPE, text: st
             reply_markup=keyboard,
         )
     else:
-        msg = await context.bot.send_message(
-            GROUP_ID,
-            text,
-            reply_markup=keyboard,
-        )
+        msg = await context.bot.send_message(GROUP_ID, text, reply_markup=keyboard)
 
     await track_message_by_id(GROUP_ID, msg.message_id, context.bot.id)
-    return campaign_id
+    return msg
 
 
 async def get_campaign_score(campaign_id: int, user_id: int) -> int:
@@ -603,8 +582,25 @@ async def get_campaign_score(campaign_id: int, user_id: int) -> int:
         return row[0]
 
 
-async def send_password_to_eligibles(context: ContextTypes.DEFAULT_TYPE, campaign_id: int):
+async def maybe_send_password_if_eligible(context: ContextTypes.DEFAULT_TYPE, campaign_id: int, user_id: int):
+    score = await get_campaign_score(campaign_id, user_id)
+
+    if score < REFERRAL_GOAL:
+        return
+
     with db() as conn:
+        already = conn.execute(
+            """
+            SELECT 1
+            FROM campaign_password_sent
+            WHERE campaign_id=%s AND user_id=%s
+            """,
+            (campaign_id, user_id),
+        ).fetchone()
+
+        if already:
+            return
+
         campaign = conn.execute(
             """
             SELECT password
@@ -614,20 +610,50 @@ async def send_password_to_eligibles(context: ContextTypes.DEFAULT_TYPE, campaig
             (campaign_id,),
         ).fetchone()
 
+    if not campaign:
+        return
+
+    password = campaign[0]
+
+    try:
+        await context.bot.send_message(
+            user_id,
+            f"🎉 Objectif atteint !\n\n"
+            f"🔑 Mot de passe :\n{password}"
+        )
+
+        with db() as conn:
+            conn.execute(
+                """
+                INSERT INTO campaign_password_sent(campaign_id, user_id, sent_at)
+                VALUES(%s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (campaign_id, user_id, int(time.time())),
+            )
+
+        print(f"✅ Mot de passe envoyé automatiquement user={user_id} campagne={campaign_id}")
+
+    except Exception as e:
+        print(f"❌ Impossible envoyer MDP auto user={user_id} | {e}")
+
+
+async def send_password_to_eligibles(context: ContextTypes.DEFAULT_TYPE, campaign_id: int):
+    with db() as conn:
+        campaign = conn.execute("SELECT password FROM marketing_campaigns WHERE id=%s", (campaign_id,)).fetchone()
         if not campaign:
             return 0, 0, 0
 
         password = campaign[0]
-
         rows = conn.execute(
             """
             SELECT referrer_id, COUNT(*) AS total
             FROM campaign_referrals
             WHERE campaign_id=%s
             GROUP BY referrer_id
-            HAVING COUNT(*) >= 10
+            HAVING COUNT(*) >= %s
             """,
-            (campaign_id,),
+            (campaign_id, REFERRAL_GOAL),
         ).fetchall()
 
     sent = 0
@@ -638,8 +664,7 @@ async def send_password_to_eligibles(context: ContextTypes.DEFAULT_TYPE, campaig
         with db() as conn:
             exists = conn.execute(
                 """
-                SELECT 1
-                FROM campaign_password_sent
+                SELECT 1 FROM campaign_password_sent
                 WHERE campaign_id=%s AND user_id=%s
                 """,
                 (campaign_id, user_id),
@@ -650,10 +675,7 @@ async def send_password_to_eligibles(context: ContextTypes.DEFAULT_TYPE, campaig
             continue
 
         try:
-            await context.bot.send_message(
-                user_id,
-                f"🎉 Tu es éligible.\n\nVoici le mot de passe :\n\n{password}"
-            )
+            await context.bot.send_message(user_id, f"🎉 Tu es éligible.\n\n🔑 Mot de passe :\n{password}")
 
             with db() as conn:
                 conn.execute(
@@ -673,6 +695,48 @@ async def send_password_to_eligibles(context: ContextTypes.DEFAULT_TYPE, campaig
             print(f"❌ Impossible envoyer MDP user={user_id} | {e}")
 
     return sent, failed, already
+
+
+async def validate_join(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data
+
+    user_id = data["user_id"]
+    referrer_id = data["referrer_id"]
+    campaign_id = data["campaign_id"]
+
+    try:
+        member = await context.bot.get_chat_member(GROUP_ID, user_id)
+        if member.status in ["left", "kicked"]:
+            print(f"❌ Join ignoré user={user_id}")
+            return
+    except Exception as e:
+        print(f"❌ Erreur validation join user={user_id} | {e}")
+        return
+
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO campaign_referrals(campaign_id, referrer_id, joined_user_id, joined_at)
+            VALUES(%s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            (campaign_id, referrer_id, user_id, int(time.time())),
+        )
+
+    score = await get_campaign_score(campaign_id, referrer_id)
+
+    try:
+        await context.bot.send_message(
+            referrer_id,
+            f"✅ Nouveau partage comptabilisé.\n\n"
+            f"📊 Score campagne : {score}/{REFERRAL_GOAL}"
+        )
+    except Exception as e:
+        print(f"❌ Impossible notifier referrer={referrer_id} | {e}")
+
+    await maybe_send_password_if_eligible(context, campaign_id, referrer_id)
+
+    print(f"✅ Referral validé campagne={campaign_id} referrer={referrer_id} user={user_id} score={score}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -696,19 +760,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_admin(user.id):
         await update.message.reply_text("Panel admin :", reply_markup=admin_keyboard())
     else:
-        await update.message.reply_text(
-            "✅ Si le groupe saute, tu auras le nouveau lien ici."
-        )
+        await update.message.reply_text("✅ Si le groupe saute, tu auras le nouveau lien ici.")
 
 
 async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin(update.effective_user.id):
         return
-
-    await update.message.reply_text(
-        "Panel administrateur :",
-        reply_markup=admin_keyboard(),
-    )
+    await update.message.reply_text("Panel administrateur :", reply_markup=admin_keyboard())
 
 
 async def dbcount(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -753,13 +811,9 @@ async def testdelete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remove_tracked_message(GROUP_ID, message_id)
         await update.message.reply_text(f"✅ Message {message_id} supprimé.")
     except BadRequest as e:
-        await update.message.reply_text(
-            f"❌ Impossible de supprimer {message_id}\n\nBadRequest : {e}"
-        )
+        await update.message.reply_text(f"❌ Impossible de supprimer {message_id}\n\nBadRequest : {e}")
     except Exception as e:
-        await update.message.reply_text(
-            f"❌ Impossible de supprimer {message_id}\n\nErreur : {type(e).__name__}: {e}"
-        )
+        await update.message.reply_text(f"❌ Impossible de supprimer {message_id}\n\nErreur : {type(e).__name__}: {e}")
 
 
 async def send_group_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
@@ -830,9 +884,7 @@ async def do_user_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             failed += 1
             print(f"❌ Broadcast échec user={user_id} | {e}")
 
-    await update.message.reply_text(
-        f"📢 Broadcast terminé.\n\n✅ Envoyés : {sent}\n❌ Échecs : {failed}"
-    )
+    await update.message.reply_text(f"📢 Broadcast terminé.\n\n✅ Envoyés : {sent}\n❌ Échecs : {failed}")
 
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -840,7 +892,6 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = " ".join(context.args).strip()
-
     if not text:
         await update.message.reply_text("Usage : /broadcast ton message")
         return
@@ -885,14 +936,12 @@ async def trusted_command_handler(update: Update, context: ContextTypes.DEFAULT_
         if not trusted_can_use(user.id):
             print(f"⚠️ Trusted limité : user={user.id}")
             return
-
         record_trusted_use(user.id)
 
     if not msg.reply_to_message or not msg.reply_to_message.from_user:
         return
 
     target = msg.reply_to_message.from_user
-
     await delete_user_messages(context, target.id)
 
     try:
@@ -938,16 +987,12 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(
                     user_id,
                     f"📤 Ton lien unique :\n{link}\n\n"
-                    f"📊 Score pour cette campagne : {score}/10\n\n"
-                    f"Ramène 10 personnes pour recevoir le code."
+                    f"📊 Score campagne : {score}/{REFERRAL_GOAL}\n\n"
+                    f"Ramène {REFERRAL_GOAL} personnes pour recevoir le code."
                 )
                 await safe_answer(q, "Lien envoyé en privé ✅")
             except Exception:
-                await safe_answer(
-                    q,
-                    "Ouvre le bot en privé avec /start pour recevoir ton lien.",
-                    show_alert=True,
-                )
+                await safe_answer(q, "Ouvre le bot en privé avec /start pour recevoir ton lien.", show_alert=True)
 
         except Exception as e:
             print(f"❌ Erreur génération lien user={user_id} | {e}")
@@ -958,13 +1003,16 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("score_campaign:"):
         campaign_id = int(data.split(":")[1])
         score = await get_campaign_score(campaign_id, user_id)
-        await safe_answer(q, f"📊 Ton score : {score}/10", show_alert=True)
+        await safe_answer(q, f"📊 Ton score : {score}/{REFERRAL_GOAL}", show_alert=True)
         return
 
     if not is_admin(user_id):
         return
 
-    if data == "toggle_auto":
+    if data == "back_admin":
+        await safe_edit(q, "Panel administrateur :", reply_markup=admin_keyboard())
+
+    elif data == "toggle_auto":
         current = get_setting("auto_open", "0")
         new_value = "0" if current == "1" else "1"
         set_setting("auto_open", new_value)
@@ -985,85 +1033,94 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(q, "✅ Groupe ouvert.", reply_markup=admin_keyboard())
 
     elif data == "close_now":
-        await safe_edit(
-            q,
-            "🔒 Fermeture lancée.\n\nLe nettoyage continue en arrière-plan.",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, "🔒 Fermeture lancée.\n\nLe nettoyage continue en arrière-plan.", reply_markup=admin_keyboard())
         context.application.create_task(close_group(context))
 
     elif data == "emergency":
-        await safe_edit(
-            q,
-            "🚨 Urgence lancée.\n\nLe nettoyage continue en arrière-plan.",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, "🚨 Urgence lancée.\n\nLe nettoyage continue en arrière-plan.", reply_markup=admin_keyboard())
         context.application.create_task(emergency(context))
 
     elif data == "add_word":
-        await safe_edit(
-            q,
-            "Envoie maintenant :\n\n/addword mot",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, "Envoie maintenant :\n\n/addword mot", reply_markup=admin_keyboard())
 
     elif data == "list_words":
         with db() as conn:
             rows = conn.execute("SELECT word FROM banned_words ORDER BY word").fetchall()
 
         words = "\n".join(f"- {r[0]}" for r in rows) or "Aucun mot interdit."
-
-        await safe_edit(
-            q,
-            f"📋 Mots interdits :\n\n{words}",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, f"📋 Mots interdits :\n\n{words}", reply_markup=admin_keyboard())
 
     elif data == "broadcast_users":
         context.user_data["waiting_user_broadcast"] = True
-        await safe_edit(
-            q,
-            "📢 Envoie maintenant le message à envoyer aux utilisateurs.\n\n"
-            "Tous ceux qui ont fait /start le recevront.",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, "📢 Envoie maintenant le message à envoyer aux utilisateurs.", reply_markup=admin_keyboard())
 
     elif data == "broadcast_group":
         context.user_data["waiting_group_broadcast"] = True
-        await safe_edit(
-            q,
-            "📣 Envoie maintenant l’annonce à publier dans le groupe.\n\n"
-            "Elle restera 12h puis sera supprimée.",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, "📣 Envoie maintenant l’annonce à publier dans le groupe.\n\nElle restera 12h puis sera supprimée.", reply_markup=admin_keyboard())
 
-    elif data == "marketing_start":
+    elif data == "marketing_menu":
+        await safe_edit(q, "🎯 Marketing\n\nChoisis une action :", reply_markup=marketing_keyboard())
+
+    elif data == "marketing_create":
         context.user_data["waiting_marketing_text"] = True
         context.user_data.pop("marketing_text", None)
         context.user_data.pop("marketing_photo", None)
         context.user_data.pop("marketing_password", None)
+        await safe_edit(q, "🎯 Nouveau marketing\n\nEnvoie le texte de la campagne.", reply_markup=marketing_keyboard())
+
+    elif data == "marketing_repost":
+        current_id = get_setting("current_campaign_id", "")
+        if not current_id:
+            await safe_edit(q, "❌ Aucune campagne actuelle.", reply_markup=marketing_keyboard())
+            return
+        await publish_marketing_campaign(context, int(current_id))
+        await safe_edit(q, "✅ Marketing actuel republié.", reply_markup=marketing_keyboard())
+
+    elif data == "marketing_edit_password":
+        current_id = get_setting("current_campaign_id", "")
+        if not current_id:
+            await safe_edit(q, "❌ Aucune campagne actuelle.", reply_markup=marketing_keyboard())
+            return
+        context.user_data["waiting_marketing_edit_password"] = True
+        await safe_edit(q, "🔑 Envoie le nouveau mot de passe pour la campagne actuelle.", reply_markup=marketing_keyboard())
+
+    elif data == "marketing_status":
+        current_id = get_setting("current_campaign_id", "")
+        if not current_id:
+            await safe_edit(q, "❌ Aucune campagne actuelle.", reply_markup=marketing_keyboard())
+            return
+
+        with db() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM campaign_referrals WHERE campaign_id=%s",
+                (int(current_id),),
+            ).fetchone()[0]
+            eligible = conn.execute(
+                """
+                SELECT COUNT(*) FROM (
+                    SELECT referrer_id
+                    FROM campaign_referrals
+                    WHERE campaign_id=%s
+                    GROUP BY referrer_id
+                    HAVING COUNT(*) >= %s
+                ) x
+                """,
+                (int(current_id), REFERRAL_GOAL),
+            ).fetchone()[0]
 
         await safe_edit(
             q,
-            "🎯 Marketing\n\nEnvoie le texte de la campagne.",
-            reply_markup=admin_keyboard(),
+            f"📊 Marketing actuel\n\nID : {current_id}\nJoins validés : {total}\nÉligibles : {eligible}",
+            reply_markup=marketing_keyboard(),
         )
 
     elif data == "marketing_send_password":
         current_id = get_setting("current_campaign_id", "")
         if not current_id:
-            await safe_edit(
-                q,
-                "❌ Aucune campagne marketing active.",
-                reply_markup=admin_keyboard(),
-            )
+            await safe_edit(q, "❌ Aucune campagne marketing active.", reply_markup=admin_keyboard())
             return
 
-        await safe_edit(
-            q,
-            "🔑 Envoi du mot de passe lancé.\n\nLe bot contacte les éligibles en arrière-plan.",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, "🔑 Envoi du mot de passe lancé.", reply_markup=admin_keyboard())
 
         async def bg_send():
             sent, failed, already = await send_password_to_eligibles(context, int(current_id))
@@ -1081,21 +1138,11 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = get_setting("ad_enabled", "0")
         new_value = "0" if current == "1" else "1"
         set_setting("ad_enabled", new_value)
-
-        await safe_edit(
-            q,
-            f"📣 Publicité : {'ON' if new_value == '1' else 'OFF'}",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, f"📣 Publicité : {'ON' if new_value == '1' else 'OFF'}", reply_markup=admin_keyboard())
 
     elif data == "set_ad_text":
         context.user_data["waiting_ad_text"] = True
-        await safe_edit(
-            q,
-            "✍️ Envoie maintenant le texte de la publicité.\n\n"
-            "Exemple : N’oubliez pas de partager le groupe ❤️",
-            reply_markup=admin_keyboard(),
-        )
+        await safe_edit(q, "✍️ Envoie maintenant le texte de la publicité.", reply_markup=admin_keyboard())
 
     elif data == "info":
         db_status = "❌ Non connectée"
@@ -1146,10 +1193,7 @@ async def addword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     word = " ".join(context.args).lower().strip()
 
     with db() as conn:
-        conn.execute(
-            "INSERT INTO banned_words(word) VALUES(%s) ON CONFLICT DO NOTHING",
-            (word,),
-        )
+        conn.execute("INSERT INTO banned_words(word) VALUES(%s) ON CONFLICT DO NOTHING", (word,))
 
     await update.message.reply_text(f"✅ Mot interdit ajouté : {word}")
 
@@ -1201,12 +1245,7 @@ async def member_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     print(f"❌ Impossible ban bot ajouté {new_user.id} | {e}")
 
                 if inviter and not is_admin(inviter.id):
-                    await mute_user(
-                        context,
-                        inviter.id,
-                        7 * 24 * 3600,
-                        reason="ajout bot",
-                    )
+                    await mute_user(context, inviter.id, 7 * 24 * 3600, reason="ajout bot")
 
     try:
         await msg.delete()
@@ -1225,11 +1264,7 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
     new_status = cmu.new_chat_member.status
     joined_user = cmu.new_chat_member.user
 
-    joined = old_status in ["left", "kicked"] and new_status in [
-        "member",
-        "restricted",
-        "administrator",
-    ]
+    joined = old_status in ["left", "kicked"] and new_status in ["member", "restricted", "administrator"]
 
     if not joined:
         return
@@ -1255,14 +1290,7 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     with db() as conn:
-        ref = conn.execute(
-            """
-            SELECT user_id
-            FROM referrals
-            WHERE invite_link=%s
-            """,
-            (invite_link,),
-        ).fetchone()
+        ref = conn.execute("SELECT user_id FROM referrals WHERE invite_link=%s", (invite_link,)).fetchone()
 
     if not ref:
         return
@@ -1272,30 +1300,16 @@ async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if referrer_id == joined_user.id:
         return
 
-    with db() as conn:
-        conn.execute(
-            """
-            INSERT INTO campaign_referrals(campaign_id, referrer_id, joined_user_id, joined_at)
-            VALUES(%s, %s, %s, %s)
-            ON CONFLICT DO NOTHING
-            """,
-            (int(current_campaign_id), referrer_id, joined_user.id, int(time.time())),
-        )
+    print(f"⏳ Join en attente validation campagne={current_campaign_id} referrer={referrer_id} user={joined_user.id}")
 
-    score = await get_campaign_score(int(current_campaign_id), referrer_id)
-
-    try:
-        await context.bot.send_message(
-            referrer_id,
-            f"✅ Quelqu’un vient de rejoindre avec ton lien.\n\n"
-            f"📊 Score campagne : {score}/10"
-        )
-    except Exception as e:
-        print(f"❌ Impossible notifier referrer={referrer_id} | {e}")
-
-    print(
-        f"✅ Referral campagne={current_campaign_id} "
-        f"referrer={referrer_id} joined={joined_user.id} score={score}"
+    context.job_queue.run_once(
+        validate_join,
+        when=REFERRAL_VALIDATION_SECONDS,
+        data={
+            "user_id": joined_user.id,
+            "referrer_id": referrer_id,
+            "campaign_id": int(current_campaign_id),
+        },
     )
 
 
@@ -1333,10 +1347,7 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["waiting_marketing_text"] = False
         context.user_data["marketing_text"] = msg.text or msg.caption or ""
         context.user_data["waiting_marketing_photo"] = True
-
-        await update.message.reply_text(
-            "✅ Texte enregistré.\n\nEnvoie maintenant la photo de la campagne."
-        )
+        await update.message.reply_text("✅ Texte enregistré.\n\nEnvoie maintenant la photo de la campagne.")
         return
 
     if is_admin(user.id) and context.user_data.get("waiting_marketing_photo"):
@@ -1347,10 +1358,7 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["waiting_marketing_photo"] = False
         context.user_data["marketing_photo"] = msg.photo[-1].file_id
         context.user_data["waiting_marketing_password"] = True
-
-        await update.message.reply_text(
-            "✅ Photo enregistrée.\n\nEnvoie maintenant le mot de passe à envoyer aux éligibles."
-        )
+        await update.message.reply_text("✅ Photo enregistrée.\n\nEnvoie maintenant le mot de passe.")
         return
 
     if is_admin(user.id) and context.user_data.get("waiting_marketing_password"):
@@ -1362,10 +1370,25 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         password = context.user_data.get("marketing_password", "")
 
         campaign_id = await create_marketing_campaign(context, text, photo, password)
+        await update.message.reply_text(f"✅ Campagne marketing publiée.\n\nID campagne : {campaign_id}")
+        return
 
-        await update.message.reply_text(
-            f"✅ Campagne marketing publiée.\n\nID campagne : {campaign_id}"
-        )
+    if is_admin(user.id) and context.user_data.get("waiting_marketing_edit_password"):
+        context.user_data["waiting_marketing_edit_password"] = False
+        current_id = get_setting("current_campaign_id", "")
+        if not current_id:
+            await update.message.reply_text("❌ Aucune campagne actuelle.")
+            return
+
+        new_password = msg.text or msg.caption or ""
+
+        with db() as conn:
+            conn.execute(
+                "UPDATE marketing_campaigns SET password=%s WHERE id=%s",
+                (new_password, int(current_id)),
+            )
+
+        await update.message.reply_text("✅ Mot de passe marketing modifié.")
         return
 
     if user.id in ADMIN_IDS:
@@ -1385,12 +1408,7 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"❌ Impossible supprimer lien {msg.message_id} | {e}")
 
-        await mute_user(
-            context,
-            user.id,
-            7 * 24 * 3600,
-            reason="lien interdit",
-        )
+        await mute_user(context, user.id, 7 * 24 * 3600, reason="lien interdit")
         return
 
     if msg.new_chat_members or msg.left_chat_member:
@@ -1410,20 +1428,13 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not user.is_bot:
             try:
-                await context.bot.send_message(
-                    user.id,
-                    "🔒 Le groupe est fermé pour le moment. Ton message a été supprimé.",
-                )
+                await context.bot.send_message(user.id, "🔒 Le groupe est fermé pour le moment. Ton message a été supprimé.")
             except Exception as e:
                 print(f"❌ Impossible MP user={user.id} | {e}")
-
         return
 
     with db() as conn:
-        row = conn.execute(
-            "SELECT joined_at FROM joined_users WHERE user_id=%s",
-            (user.id,),
-        ).fetchone()
+        row = conn.execute("SELECT joined_at FROM joined_users WHERE user_id=%s", (user.id,)).fetchone()
 
     if row and int(time.time()) - row[0] < 60:
         try:
@@ -1432,12 +1443,7 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"❌ Impossible supprimer spam nouveau membre {msg.message_id} | {e}")
 
-        await mute_user(
-            context,
-            user.id,
-            30 * 24 * 3600,
-            reason="nouveau membre spam",
-        )
+        await mute_user(context, user.id, 30 * 24 * 3600, reason="nouveau membre spam")
         return
 
     if text and re.search(r"[а-яА-Я\u0600-\u06FF\u4e00-\u9fff]", text):
@@ -1447,22 +1453,14 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"❌ Impossible supprimer langue interdite {msg.message_id} | {e}")
 
-        await mute_user(
-            context,
-            user.id,
-            400 * 24 * 3600,
-            reason="langue interdite",
-        )
+        await mute_user(context, user.id, 400 * 24 * 3600, reason="langue interdite")
         return
 
     lowered = text.lower()
 
     if lowered:
         with db() as conn:
-            words = [
-                r[0]
-                for r in conn.execute("SELECT word FROM banned_words").fetchall()
-            ]
+            words = [r[0] for r in conn.execute("SELECT word FROM banned_words").fetchall()]
 
         if any(word in lowered for word in words):
             try:
@@ -1471,12 +1469,7 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 print(f"❌ Impossible supprimer mot interdit {msg.message_id} | {e}")
 
-            await mute_user(
-                context,
-                user.id,
-                30 * 24 * 3600,
-                reason="mot interdit",
-            )
+            await mute_user(context, user.id, 30 * 24 * 3600, reason="mot interdit")
 
 
 async def schedule_checker(context: ContextTypes.DEFAULT_TYPE):

@@ -183,7 +183,7 @@ def trusted_can_use(user_id: int) -> bool:
             (user_id, one_hour_ago),
         ).fetchone()
 
-        return row[0] < 5
+        return row[0] < 10
 
 
 def record_trusted_use(user_id: int):

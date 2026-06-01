@@ -39,7 +39,7 @@ from telegram.ext import (
     filters,
 )
 
-APP_VERSION = "FINAL_COMPLETE_V31_PURGE"
+APP_VERSION = "FINAL_COMPLETE_V32_SCHEDULE_FIX"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").replace("@", "")
@@ -1767,7 +1767,7 @@ async def save_user_message_if_session(update: Update):
 # =========================
 
 MSG_PARTICIPATION_REQUIRED = "⚠️ Merci de participer avant d’envoyer un message.\nEnvoyez au moins 1 photo ou 1 vidéo jamais publiée."
-MSG_REPOST = "♻️ Ton média a déjà été publié par quelqu'un d'autre !"
+MSG_REPOST = "♻️ Ce média a déjà été publié."
 MSG_LINK_FORBIDDEN = "🔗 Les liens ne sont pas autorisés."
 MSG_FORWARD_FORBIDDEN = "🚫 Les transferts ne sont pas autorisés."
 MSG_GENERIC_FORBIDDEN = "🚫 Message non autorisé."
@@ -2081,7 +2081,11 @@ async def warn_non_participants(context):
         txt = (
             "⚠️ Veuillez participer si vous voulez rester dans le groupe.\n"
             "Envoyez au moins 1 photo ou 1 vidéo jamais publiée.\n\n"
+            "✅ Une seule participation valide suffit pour rester définitivement.\n\n"
             "Si vous ne participez pas, vous serez supprimé du groupe sous peu.\n\n"
+            f"🥾 Déjà supprimés pour non-participation : {kicked_total}\n"
+            f"🥾 Kick automatique : {'ON' if kick_np == 'on' else 'OFF'}\n"
+            "Limite : 20 suppressions / jour\n\n"
         )
         txt += " ".join(mentions)
 
@@ -2208,14 +2212,49 @@ async def ban_report(context):
 
 # ---------------- SCHEDULE ----------------
 
-def get_schedule_for_day(now: datetime):
+def get_schedule_for_weekday(wd: int):
     # 0=lundi, 5=samedi, 6=dimanche
-    wd = now.weekday()
     if wd == 5:
         return {"open_hour": 23, "open_minute": 0, "close_hour": 1, "close_minute": 0}
     if wd == 6:
         return {"open_hour": 22, "open_minute": 30, "close_hour": 0, "close_minute": 15}
     return {"open_hour": 22, "open_minute": 0, "close_hour": 0, "close_minute": 0}
+
+
+def get_schedule_for_day(now):
+    return get_schedule_for_weekday(now.weekday())
+
+
+def schedule_window_for_date(day: datetime, schedule: dict):
+    open_dt = day.replace(
+        hour=schedule["open_hour"],
+        minute=schedule["open_minute"],
+        second=0,
+        microsecond=0,
+    )
+    close_dt = day.replace(
+        hour=schedule["close_hour"],
+        minute=schedule["close_minute"],
+        second=0,
+        microsecond=0,
+    )
+    if close_dt <= open_dt:
+        close_dt += timedelta(days=1)
+    return open_dt, close_dt
+
+
+def active_schedule_window(now: datetime):
+    # On vérifie d'abord la session commencée hier.
+    # C'est indispensable pour samedi->dimanche 01h00 et dimanche->lundi 00h15.
+    yesterday = now - timedelta(days=1)
+    y_schedule = get_schedule_for_weekday(yesterday.weekday())
+    y_open, y_close = schedule_window_for_date(yesterday, y_schedule)
+    if y_open <= now < y_close:
+        return y_schedule, y_open, y_close
+
+    today_schedule = get_schedule_for_weekday(now.weekday())
+    t_open, t_close = schedule_window_for_date(now, today_schedule)
+    return today_schedule, t_open, t_close
 
 
 def target_datetime(now: datetime, hour: int, minute: int):
@@ -2225,22 +2264,18 @@ def target_datetime(now: datetime, hour: int, minute: int):
     return target
 
 
-def minutes_until(now: datetime, hour: int, minute: int) -> int:
-    seconds = int((target_datetime(now, hour, minute) - now).total_seconds())
+def minutes_until_dt(now: datetime, target: datetime) -> int:
+    seconds = int((target - now).total_seconds())
     return max(0, (seconds + 59) // 60)
 
 
+def minutes_until(now: datetime, hour: int, minute: int) -> int:
+    return minutes_until_dt(now, target_datetime(now, hour, minute))
+
+
 def is_open_window_precise(now: datetime, schedule: dict) -> bool:
-    open_today = now.replace(hour=schedule["open_hour"], minute=schedule["open_minute"], second=0, microsecond=0)
-    close_today = now.replace(hour=schedule["close_hour"], minute=schedule["close_minute"], second=0, microsecond=0)
-
-    if close_today <= open_today:
-        close_today += timedelta(days=1)
-
-    open_yesterday = open_today - timedelta(days=1)
-    close_yesterday = close_today - timedelta(days=1)
-
-    return (open_today <= now < close_today) or (open_yesterday <= now < close_yesterday)
+    _, open_dt, close_dt = active_schedule_window(now)
+    return open_dt <= now < close_dt
 
 
 async def send_countdown_once(context: ContextTypes.DEFAULT_TYPE, key: str, text: str):
@@ -2256,15 +2291,10 @@ async def hourly_job(context: ContextTypes.DEFAULT_TYPE):
         return
 
     now = datetime.now(TZ)
-    schedule = get_schedule_for_day(now)
+    schedule, open_dt, close_dt = active_schedule_window(now)
 
     group_open = await get_setting("group_open", "off")
-    should_be_open = is_open_window_precise(now, schedule)
-
-    open_h = schedule["open_hour"]
-    open_m = schedule["open_minute"]
-    close_h = schedule["close_hour"]
-    close_m = schedule["close_minute"]
+    should_be_open = open_dt <= now < close_dt
 
     if should_be_open and group_open != "on":
         await set_setting("last_countdown_key", "")
@@ -2277,41 +2307,48 @@ async def hourly_job(context: ContextTypes.DEFAULT_TYPE):
         await close_group_and_clean(context)
         return
 
-    # Groupe fermé : countdown vers ouverture.
+    # Groupe fermé : countdown vers la prochaine ouverture réelle.
     if group_open != "on":
-        m = minutes_until(now, open_h, open_m)
+        if now < open_dt:
+            next_open = open_dt
+        else:
+            tomorrow = now + timedelta(days=1)
+            tomorrow_schedule = get_schedule_for_weekday(tomorrow.weekday())
+            next_open, _ = schedule_window_for_date(tomorrow, tomorrow_schedule)
 
-        # Avant la dernière heure : uniquement à l'heure pile, en heures.
+        m = minutes_until_dt(now, next_open)
+        suffix = next_open.strftime("%Y%m%d%H%M")
+
         if m > 60:
             if now.minute == 0:
                 hours = max(1, (m + 59) // 60)
                 await send_countdown_once(
                     context,
-                    f"open_h_{hours}",
+                    f"open_h_{hours}_{suffix}",
                     f"⏰ Prochaine ouverture dans {hours} heure(s)."
                 )
             return
 
-        # Dernière heure : en minutes.
         if m == 60:
-            await send_countdown_once(context, "open_60", "⏰ Prochaine ouverture dans 60 minutes.")
+            await send_countdown_once(context, f"open_60_{suffix}", "⏰ Prochaine ouverture dans 60 minutes.")
         elif m == 30:
-            await send_countdown_once(context, "open_30", "⏰ Prochaine ouverture dans 30 minutes.")
+            await send_countdown_once(context, f"open_30_{suffix}", "⏰ Prochaine ouverture dans 30 minutes.")
         elif m == 10:
-            await send_countdown_once(context, "open_10", "⏰ Ouverture dans 10 minutes.")
+            await send_countdown_once(context, f"open_10_{suffix}", "⏰ Ouverture dans 10 minutes.")
         elif 1 <= m <= 5:
-            await send_countdown_once(context, f"open_{m}", f"⏰ Ouverture dans {m} minute(s).")
+            await send_countdown_once(context, f"open_{m}_{suffix}", f"⏰ Ouverture dans {m} minute(s).")
         return
 
-    # Groupe ouvert : countdown vers fermeture.
-    m = minutes_until(now, close_h, close_m)
+    # Groupe ouvert : countdown vers la fermeture de la session active.
+    m = minutes_until_dt(now, close_dt)
+    suffix = close_dt.strftime("%Y%m%d%H%M")
 
     if m == 30:
-        await send_countdown_once(context, "close_30", "⚠️ Fermeture du groupe dans 30 minutes.")
+        await send_countdown_once(context, f"close_30_{suffix}", "⚠️ Fermeture du groupe dans 30 minutes.")
     elif m == 15:
-        await send_countdown_once(context, "close_15", "⚠️ Fermeture du groupe dans 15 minutes.")
+        await send_countdown_once(context, f"close_15_{suffix}", "⚠️ Fermeture du groupe dans 15 minutes.")
     elif 1 <= m <= 5:
-        await send_countdown_once(context, f"close_{m}", f"⚠️ Fermeture dans {m} minute(s).")
+        await send_countdown_once(context, f"close_{m}_{suffix}", f"⚠️ Fermeture dans {m} minute(s).")
 
 
 async def post_init(app):

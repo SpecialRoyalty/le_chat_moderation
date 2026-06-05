@@ -39,7 +39,7 @@ from telegram.ext import (
     filters,
 )
 
-APP_VERSION = "FINAL_COMPLETE_V41_PANEL_FIX"
+APP_VERSION = "FINAL_COMPLETE_V42_PRIVATE_RANK"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").replace("@", "")
@@ -1592,22 +1592,58 @@ async def notify_top10_changes(context: ContextTypes.DEFAULT_TYPE):
         """, list(current_ids))
 
 
+async def get_share_rank(user_id: int):
+    async with db_pool.acquire() as con:
+        rows = await con.fetch("""
+        SELECT
+            r.referrer_id,
+            COUNT(*) AS total,
+            MIN(r.validated_at) AS first_validated,
+            MIN(rl.created_at) AS link_created
+        FROM referrals r
+        LEFT JOIN referral_links rl ON rl.user_id = r.referrer_id
+        WHERE r.validated_at IS NOT NULL
+        GROUP BY r.referrer_id
+        ORDER BY total DESC, first_validated ASC NULLS LAST, link_created ASC NULLS LAST, r.referrer_id ASC
+        """)
+
+    for idx, row in enumerate(rows, start=1):
+        if row["referrer_id"] == user_id:
+            return idx
+
+    return None
+
+
 async def send_share_link_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await track_private_user(user)
+
     async with db_pool.acquire() as con:
         abuse = await con.fetchrow("SELECT blacklisted FROM referrer_abuse WHERE referrer_id=$1", user.id)
         if abuse and abuse["blacklisted"]:
             await update.message.reply_text("❌ Ton accès au partage est bloqué.")
             return
+
     link = await get_or_create_user_private_link(context, user.id)
     total = await get_share_count(user.id)
+    rank = await get_share_rank(user.id)
+
+    if rank:
+        rank_line = f"🏆 Votre rang actuel : #{rank}"
+        if rank > 10:
+            rank_line += "\n🎯 Top 10 à atteindre."
+    else:
+        rank_line = "🏆 Votre rang actuel : non classé\n🎯 Top 10 à atteindre."
+
     await update.message.reply_text(
         "🤝 Votre lien personnel\n\n"
         f"{link}\n\n"
-        f"✅ Invitations validées : {total}\n\n"
+        f"✅ Invitations validées : {total}\n"
+        f"{rank_line}\n\n"
         "Partagez ce lien pour monter dans le classement."
     )
+
+
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):

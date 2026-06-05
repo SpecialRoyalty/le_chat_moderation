@@ -39,7 +39,7 @@ from telegram.ext import (
     filters,
 )
 
-APP_VERSION = "FINAL_COMPLETE_V38_CALLBACK_FIX"
+APP_VERSION = "FINAL_COMPLETE_V39_SHARE_RANKING"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").replace("@", "")
@@ -187,6 +187,25 @@ async def init_db():
         """)
 
         await con.execute("""
+        CREATE TABLE IF NOT EXISTS private_users(
+            user_id BIGINT PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            started_at TIMESTAMP DEFAULT NOW(),
+            last_seen_at TIMESTAMP DEFAULT NOW()
+        )
+        """)
+        await con.execute("""
+        CREATE TABLE IF NOT EXISTS leaderboard_rank_cache(
+            user_id BIGINT PRIMARY KEY,
+            last_rank INTEGER,
+            last_count INTEGER DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+        """)
+
+        await con.execute("""
         CREATE TABLE IF NOT EXISTS admin_states(
             user_id BIGINT PRIMARY KEY,
             state TEXT,
@@ -302,6 +321,9 @@ async def init_db():
             "ad1_text": "",
             "ad2_enabled": "off",
             "ad2_text": "",
+            "share_publicity_text": "🤝 Partagez le groupe et montez dans le classement.",
+            "share_publicity_photo_file_id": "",
+            "private_broadcast_text": "",
             "share_ad_text": "🎁 Partagez votre lien pour recevoir la rediffusion complète du groupe.",
             "share_ad_photo_file_id": "",
             "leaderboard_enabled": "on",
@@ -425,6 +447,15 @@ async def init_db():
         await con.execute("ALTER TABLE IF EXISTS reward_campaigns ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE")
         await con.execute("ALTER TABLE IF EXISTS reward_campaigns ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()")
         await con.execute("ALTER TABLE IF EXISTS reward_campaigns ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()")
+
+        await con.execute("ALTER TABLE IF EXISTS private_users ADD COLUMN IF NOT EXISTS username TEXT")
+        await con.execute("ALTER TABLE IF EXISTS private_users ADD COLUMN IF NOT EXISTS first_name TEXT")
+        await con.execute("ALTER TABLE IF EXISTS private_users ADD COLUMN IF NOT EXISTS last_name TEXT")
+        await con.execute("ALTER TABLE IF EXISTS private_users ADD COLUMN IF NOT EXISTS started_at TIMESTAMP DEFAULT NOW()")
+        await con.execute("ALTER TABLE IF EXISTS private_users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP DEFAULT NOW()")
+        await con.execute("ALTER TABLE IF EXISTS leaderboard_rank_cache ADD COLUMN IF NOT EXISTS last_rank INTEGER")
+        await con.execute("ALTER TABLE IF EXISTS leaderboard_rank_cache ADD COLUMN IF NOT EXISTS last_count INTEGER DEFAULT 0")
+        await con.execute("ALTER TABLE IF EXISTS leaderboard_rank_cache ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()")
 
         tables = await con.fetch("""
         SELECT table_name FROM information_schema.tables
@@ -973,9 +1004,8 @@ async def main_keyboard():
         [InlineKeyboardButton("🔗 Liens récompenses", callback_data="reward_links_menu")],
         [InlineKeyboardButton(f"📢 Pub 1 {led(ad1_enabled)}", callback_data="toggle:ad1_enabled"), InlineKeyboardButton("✏️ Texte Pub 1", callback_data="set_ad1_text")],
         [InlineKeyboardButton(f"📢 Pub 2 {led(ad2_enabled)}", callback_data="toggle:ad2_enabled"), InlineKeyboardButton("✏️ Texte Pub 2", callback_data="set_ad2_text")],
-        [InlineKeyboardButton("🖼️ Config pub Mon lien", callback_data="set_share_ad"), InlineKeyboardButton("📣 Publier Mon lien", callback_data="publish_share_ad")],
+        [InlineKeyboardButton("📣 Publicité partage", callback_data="share_publicity_menu")],
         [InlineKeyboardButton(f"🏆 Classement {led(leaderboard_enabled)}", callback_data="toggle:leaderboard_enabled")],
-        [InlineKeyboardButton("🎁 Campagne rediffusion", callback_data="campaign_menu")],
         [InlineKeyboardButton(pub_label, callback_data="publish_ad" if links_ok else "publish_ad_locked")],
         [InlineKeyboardButton("📊 Stats parrainage", callback_data="ref_stats")],
         [InlineKeyboardButton("📣 Relancer non-participants", callback_data="warn_non_participants")],
@@ -1470,55 +1500,174 @@ async def get_or_create_user_private_link(context: ContextTypes.DEFAULT_TYPE, us
 
 
 async def build_referral_leaderboard_text(limit: int = 10):
+    return await build_leaderboard_text()
+
+
+
+
+
+async def track_private_user(user):
+    if not user:
+        return
     async with db_pool.acquire() as con:
-        rows = await con.fetch("""
-        SELECT r.referrer_id, COUNT(*) AS total
+        await con.execute("""
+        INSERT INTO private_users(user_id,username,first_name,last_name,started_at,last_seen_at)
+        VALUES($1,$2,$3,$4,NOW(),NOW())
+        ON CONFLICT(user_id) DO UPDATE SET
+            username=$2,
+            first_name=$3,
+            last_name=$4,
+            last_seen_at=NOW()
+        """, user.id, user.username, user.first_name, user.last_name)
+
+
+def mask_display_name(username, first_name=None, user_id=None):
+    if username:
+        raw = username.replace("@", "")
+        if len(raw) <= 2:
+            return "@" + raw[:1] + "**"
+        return "@" + raw[:2] + "**" + raw[-1:]
+    if first_name:
+        if len(first_name) <= 2:
+            return first_name[:1] + "**"
+        return first_name[:2] + "**" + first_name[-1:]
+    return f"ID {str(user_id)[:2]}****"
+
+
+async def get_or_create_user_private_link(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    async with db_pool.acquire() as con:
+        row = await con.fetchrow("SELECT invite_link FROM referral_links WHERE user_id=$1", user_id)
+        if row and row["invite_link"]:
+            return row["invite_link"]
+
+    link = await context.bot.create_chat_invite_link(
+        GROUP_ID,
+        name=f"ref_{user_id}",
+        creates_join_request=False,
+    )
+
+    async with db_pool.acquire() as con:
+        await con.execute("""
+        INSERT INTO referral_links(user_id, invite_link, created_at)
+        VALUES($1,$2,NOW())
+        ON CONFLICT(user_id) DO UPDATE SET invite_link=$2
+        """, user_id, link.invite_link)
+
+    return link.invite_link
+
+
+async def get_share_count(user_id: int):
+    async with db_pool.acquire() as con:
+        c = await con.fetchval("""
+        SELECT COUNT(*) FROM referrals
+        WHERE referrer_id=$1 AND validated_at IS NOT NULL
+        """, user_id)
+    return int(c or 0)
+
+
+async def build_global_top10():
+    async with db_pool.acquire() as con:
+        return await con.fetch("""
+        SELECT
+            r.referrer_id,
+            COUNT(*) AS total,
+            MIN(r.validated_at) AS first_validated,
+            MIN(rl.created_at) AS link_created,
+            MAX(pu.username) AS username,
+            MAX(pu.first_name) AS first_name
         FROM referrals r
+        LEFT JOIN referral_links rl ON rl.user_id = r.referrer_id
+        LEFT JOIN private_users pu ON pu.user_id = r.referrer_id
         WHERE r.validated_at IS NOT NULL
         GROUP BY r.referrer_id
-        ORDER BY total DESC
-        LIMIT $1
-        """, limit)
+        ORDER BY total DESC, first_validated ASC NULLS LAST, link_created ASC NULLS LAST, r.referrer_id ASC
+        LIMIT 10
+        """)
 
+
+async def build_leaderboard_text():
+    rows = await build_global_top10()
     if not rows:
         return None
-
-    lines = ["🏆 Meilleurs partageurs", ""]
-    rank = 1
-    for r in rows:
-        uid = str(r["referrer_id"])
-        masked = uid[:2] + "****"
-        lines.append(f"{rank}. {masked} : {r['total']}")
-        rank += 1
-
+    lines = ["🏆 Top 10 partageurs", ""]
+    for i, r in enumerate(rows, start=1):
+        name = mask_display_name(r["username"], r["first_name"], r["referrer_id"])
+        lines.append(f"{i}. {name} — {int(r['total'] or 0)} invitation(s)")
     lines.append("")
-    lines.append("Les meilleurs partageurs peuvent recevoir un accès VIP gratuit.")
+    lines.append("Cliquez sur « Je partage » pour recevoir votre lien.")
     return "\n".join(lines)
 
 
+async def notify_top10_changes(context: ContextTypes.DEFAULT_TYPE):
+    rows = await build_global_top10()
+    current_ids = set()
+    for i, r in enumerate(rows, start=1):
+        uid = r["referrer_id"]
+        total = int(r["total"] or 0)
+        current_ids.add(uid)
+        async with db_pool.acquire() as con:
+            old = await con.fetchrow("SELECT last_rank FROM leaderboard_rank_cache WHERE user_id=$1", uid)
+        if not old or not old["last_rank"] or int(old["last_rank"]) > 10:
+            try:
+                await context.bot.send_message(uid, f"🎉 Bravo, vous êtes entré dans le Top 10 des partageurs.\nVotre rang actuel : #{i}.")
+            except Exception:
+                pass
+        async with db_pool.acquire() as con:
+            await con.execute("""
+            INSERT INTO leaderboard_rank_cache(user_id,last_rank,last_count,updated_at)
+            VALUES($1,$2,$3,NOW())
+            ON CONFLICT(user_id) DO UPDATE SET last_rank=$2,last_count=$3,updated_at=NOW()
+            """, uid, i, total)
+
+    async with db_pool.acquire() as con:
+        await con.execute("""
+        UPDATE leaderboard_rank_cache
+        SET last_rank=NULL, updated_at=NOW()
+        WHERE last_rank IS NOT NULL
+          AND user_id <> ALL($1::bigint[])
+        """, list(current_ids))
+
+
+async def send_share_link_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await track_private_user(user)
+    async with db_pool.acquire() as con:
+        abuse = await con.fetchrow("SELECT blacklisted FROM referrer_abuse WHERE referrer_id=$1", user.id)
+        if abuse and abuse["blacklisted"]:
+            await update.message.reply_text("❌ Ton accès au partage est bloqué.")
+            return
+    link = await get_or_create_user_private_link(context, user.id)
+    total = await get_share_count(user.id)
+    await update.message.reply_text(
+        "🤝 Votre lien personnel\n\n"
+        f"{link}\n\n"
+        f"✅ Invitations validées : {total}\n\n"
+        "Partagez ce lien pour monter dans le classement."
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await track_private_user(user)
+
     payload = context.args[0] if context.args else ""
     if payload == "share":
-        user = update.effective_user
-        link = await get_or_create_user_private_link(context, user.id)
-        await update.message.reply_text(await campaign_status_text(user.id))
+        await send_share_link_private(update, context)
         return
 
-    user = update.effective_user
     if not user:
         return
 
     args = context.args or []
-
     if args and args[0] == "getlink":
-        await send_referral_link_private(update, context)
+        await send_share_link_private(update, context)
         return
 
     if is_admin(user.id):
         await set_admin_state(user.id, None)
         await update.message.reply_text(await panel_text(), reply_markup=await main_keyboard())
     else:
-        await update.message.reply_text("Clique sur le bouton dans le groupe pour recevoir ton lien privé.")
+        await update.message.reply_text("Cliquez sur le bouton « Je partage » dans le groupe pour recevoir votre lien personnel.")
 
 
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1668,6 +1817,41 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "publish_campaign_ad":
         await publish_campaign_ad(context)
         await safe_edit(q, await panel_text("Campagne publiée"), reply_markup=await main_keyboard())
+        return
+
+    if data == "share_publicity_menu":
+        text = (
+            "📣 PUBLICITÉ PARTAGE\n\n"
+            "Configure le texte et l'image.\n"
+            "Le bouton affiché sera : 🤝 Je partage."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Texte", callback_data="share_pub_set_text"), InlineKeyboardButton("🖼️ Image", callback_data="share_pub_set_image")],
+            [InlineKeyboardButton("📣 Publier publicité", callback_data="publish_share_publicity")],
+            [InlineKeyboardButton("📢 Broadcast privé", callback_data="broadcast_private_set")],
+            [InlineKeyboardButton("⬅️ Retour", callback_data="info")]
+        ])
+        await safe_edit(q, text, reply_markup=kb)
+        return
+
+    if data == "share_pub_set_text":
+        await set_admin_state(q.from_user.id, "share_pub_set_text")
+        await safe_edit(q, "✏️ Envoie le texte de la publicité partage.", reply_markup=back_keyboard())
+        return
+
+    if data == "share_pub_set_image":
+        await set_admin_state(q.from_user.id, "share_pub_set_image")
+        await safe_edit(q, "🖼️ Envoie l'image de la publicité partage.", reply_markup=back_keyboard())
+        return
+
+    if data == "publish_share_publicity":
+        await publish_share_publicity(context)
+        await safe_edit(q, await panel_text("Publicité partage publiée"), reply_markup=await main_keyboard())
+        return
+
+    if data == "broadcast_private_set":
+        await set_admin_state(q.from_user.id, "broadcast_private")
+        await safe_edit(q, "📢 Envoie le message à broadcaster en privé aux personnes qui ont déjà lancé le bot.", reply_markup=back_keyboard())
         return
 
     if data == "reward_links_menu":
@@ -1865,7 +2049,7 @@ async def publish_ad(context: ContextTypes.DEFAULT_TYPE):
         "\n"
         "\n"
         "\n\n"
-        "Cliquez ci-dessous pour recevoir votre lien personnel."
+        "Cliquez sur « Je partage » pour recevoir votre lien personnel."
     )
 
     keyboard = InlineKeyboardMarkup([
@@ -1878,16 +2062,7 @@ async def publish_ad(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_referral_link_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    async with db_pool.acquire() as con:
-        abuse = await con.fetchrow("SELECT blacklisted FROM referrer_abuse WHERE referrer_id=$1", user.id)
-        if abuse and abuse["blacklisted"]:
-            await update.message.reply_text("❌ Ton accès au parrainage est bloqué.")
-            return
-
-    await get_or_create_user_private_link(context, user.id)
-    await update.message.reply_text(await campaign_status_text(user.id))
+    await send_share_link_private(update, context)
 
 
 async def validate_join_later(context: ContextTypes.DEFAULT_TYPE, invited_user_id: int):
@@ -1923,6 +2098,7 @@ async def validate_join_later(context: ContextTypes.DEFAULT_TYPE, invited_user_i
         """, referrer_id, invited_user_id, invite_link)
         await con.execute("DELETE FROM pending_joins WHERE invited_user_id=$1", invited_user_id)
     await deliver_campaign_reward_if_ready(context, referrer_id)
+    await notify_top10_changes(context)
 
 
 async def send_reward_link(context: ContextTypes.DEFAULT_TYPE, user_id: int, level: int):
@@ -2065,6 +2241,31 @@ async def handle_private_admin(update: Update, context: ContextTypes.DEFAULT_TYP
         await create_new_campaign(context, text)
         await set_admin_state(user.id, None)
         await msg.reply_text("✅ Nouvelle campagne créée. Les utilisateurs engagés ont été notifiés.")
+        return
+
+    if state == "share_pub_set_text":
+        await set_setting("share_publicity_text", text)
+        await set_admin_state(user.id, None)
+        await msg.reply_text("✅ Texte publicité partage mis à jour.")
+        return
+
+    if state == "share_pub_set_image":
+        if not msg.photo:
+            await msg.reply_text("❌ Envoie une image.")
+            return
+        await set_setting("share_publicity_photo_file_id", msg.photo[-1].file_id)
+        await set_admin_state(user.id, None)
+        await msg.reply_text("✅ Image publicité partage mise à jour.")
+        return
+
+    if state == "broadcast_private":
+        broadcast_text = msg.caption or text
+        if not broadcast_text:
+            await msg.reply_text("❌ Envoie un texte à broadcaster.")
+            return
+        await set_admin_state(user.id, None)
+        sent = await broadcast_private_users(context, broadcast_text)
+        await msg.reply_text(f"✅ Broadcast terminé : {sent} personne(s) contactée(s).")
         return
 
     if state == "ban_hash":
@@ -2620,8 +2821,7 @@ async def publish_campaign_ad(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def publish_share_ad(context: ContextTypes.DEFAULT_TYPE):
-    # Coordonné avec la campagne rediffusion : même texte/image/bouton.
-    return await publish_campaign_ad(context)
+    return await publish_share_publicity(context)
 
 
 async def auto_ads_job(context: ContextTypes.DEFAULT_TYPE):
@@ -2650,6 +2850,36 @@ async def leaderboard_job(context: ContextTypes.DEFAULT_TYPE):
     msg = await context.bot.send_message(GROUP_ID, text)
     await save_message(GROUP_ID, msg.message_id, None, True)
     context.application.create_task(delete_later(context, GROUP_ID, msg.message_id, 180))
+
+
+async def publish_share_publicity(context: ContextTypes.DEFAULT_TYPE):
+    text = await get_setting("share_publicity_text", "🤝 Partagez le groupe et montez dans le classement.")
+    photo_id = await get_setting("share_publicity_photo_file_id", "")
+    url = f"https://t.me/{BOT_USERNAME}?start=share" if BOT_USERNAME else None
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🤝 Je partage", url=url)]]) if url else None
+
+    if photo_id:
+        msg = await context.bot.send_photo(GROUP_ID, photo_id, caption=text, reply_markup=keyboard)
+    else:
+        msg = await context.bot.send_message(GROUP_ID, text, reply_markup=keyboard)
+
+    await save_message(GROUP_ID, msg.message_id, None, True)
+    return msg
+
+
+async def broadcast_private_users(context: ContextTypes.DEFAULT_TYPE, text: str):
+    async with db_pool.acquire() as con:
+        rows = await con.fetch("SELECT user_id FROM private_users ORDER BY last_seen_at DESC")
+
+    sent = 0
+    for r in rows:
+        try:
+            await context.bot.send_message(r["user_id"], text)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            pass
+    return sent
 
 
 async def post_rules(context):
@@ -2768,6 +2998,36 @@ async def send_countdown_once(context: ContextTypes.DEFAULT_TYPE, key: str, text
     await send_system_message(context, text, "countdown", record_in_session=False)
 
 
+async def mid_session_leaderboard_job(context: ContextTypes.DEFAULT_TYPE):
+    if await get_setting("leaderboard_enabled", "on") != "on":
+        return
+    if await get_setting("group_open", "off") != "on":
+        return
+
+    now = datetime.now(TZ)
+    try:
+        _, open_dt, close_dt = active_schedule_window(now)
+    except Exception:
+        return
+
+    mid = open_dt + (close_dt - open_dt) / 2
+    if abs((now - mid).total_seconds()) > 90:
+        return
+
+    key = f"leaderboard_mid_{open_dt.strftime('%Y%m%d%H%M')}"
+    if await get_setting("last_leaderboard_key", "") == key:
+        return
+
+    text = await build_leaderboard_text()
+    if not text:
+        return
+
+    await set_setting("last_leaderboard_key", key)
+    msg = await context.bot.send_message(GROUP_ID, text)
+    await save_message(GROUP_ID, msg.message_id, None, True)
+    context.application.create_task(delete_later(context, GROUP_ID, msg.message_id, 180))
+
+
 async def hourly_job(context: ContextTypes.DEFAULT_TYPE):
     if await get_setting("auto_schedule", "on") != "on":
         return
@@ -2841,6 +3101,7 @@ async def post_init(app):
     app.job_queue.run_repeating(kick_old_non_participants, interval=6 * 60 * 60, first=300)
     app.job_queue.run_repeating(auto_ads_job, interval=10 * 60, first=240)
     app.job_queue.run_repeating(leaderboard_job, interval=60 * 60, first=3600)
+    app.job_queue.run_repeating(mid_session_leaderboard_job, interval=60, first=30)
 
 
 async def error_handler(update, context):

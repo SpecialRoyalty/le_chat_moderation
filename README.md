@@ -1,4 +1,4 @@
-# Telegram Railway Bot - FINAL_COMPLETE_V38_CALLBACK_FIX
+# Telegram Railway Bot - FINAL_COMPLETE_V39_SHARE_RANKING
 
 Version cohérente nettoyée.
 
@@ -31,7 +31,7 @@ Version cohérente nettoyée.
 
 Dans les logs :
 
-STARTING FINAL_COMPLETE_V38_CALLBACK_FIX
+STARTING FINAL_COMPLETE_V39_SHARE_RANKING
 
 Si tu vois encore `Vidéos : x/60`, c'est que Railway tourne encore sur une ancienne version.
 
@@ -79,7 +79,7 @@ Message d'avertissement enrichi :
 - Compatible base neuve et ancienne base partiellement migrée.
 
 Vérification Railway :
-STARTING FINAL_COMPLETE_V38_CALLBACK_FIX
+STARTING FINAL_COMPLETE_V39_SHARE_RANKING
 
 
 ## V22 - Correction complète SQL / hash / anti-repost
@@ -101,7 +101,7 @@ Important :
 - sinon V22 tente de réparer automatiquement le schéma.
 
 Vérification Railway :
-STARTING FINAL_COMPLETE_V38_CALLBACK_FIX
+STARTING FINAL_COMPLETE_V39_SHARE_RANKING
 
 Test rapide :
 1. envoie une photo ;
@@ -128,7 +128,7 @@ Changements :
   - plus de spam mode raid.
 
 Vérification Railway :
-STARTING FINAL_COMPLETE_V38_CALLBACK_FIX
+STARTING FINAL_COMPLETE_V39_SHARE_RANKING
 
 
 ## V24 - Textes runtime corrigés
@@ -169,7 +169,7 @@ Correction incluse :
 - fix `MSG_FAKE_COMMAND` si la V24 contenait l'auto-référence cassée.
 
 Vérification Railway :
-STARTING FINAL_COMPLETE_V38_CALLBACK_FIX
+STARTING FINAL_COMPLETE_V39_SHARE_RANKING
 
 
 ## V26 - Fix punish_ban + rapports admin
@@ -182,7 +182,7 @@ Corrections :
 - Transferts toujours autorisés comme en V25.
 
 Vérification Railway :
-STARTING FINAL_COMPLETE_V38_CALLBACK_FIX
+STARTING FINAL_COMPLETE_V39_SHARE_RANKING
 
 
 ## V27 - Hash robuste + message dissuasion modération
@@ -201,7 +201,7 @@ Message dissuasion :
 - affiche suppressions, exclusions et restrictions.
 
 Vérification Railway :
-STARTING FINAL_COMPLETE_V38_CALLBACK_FIX
+STARTING FINAL_COMPLETE_V39_SHARE_RANKING
 
 
 ## V28 - Fix trusted mute
@@ -214,7 +214,7 @@ Correction :
 - Un trusted qui utilise ces commandes n'est jamais mute par ce système.
 
 Vérification Railway :
-STARTING FINAL_COMPLETE_V38_CALLBACK_FIX
+STARTING FINAL_COMPLETE_V39_SHARE_RANKING
 
 
 ## V29 - Priorité média interdit + trusted silencieux
@@ -230,7 +230,7 @@ Corrections :
 - `/supprimer` reste alias officiel de `/supprime`.
 
 Vérification Railway :
-STARTING FINAL_COMPLETE_V38_CALLBACK_FIX
+STARTING FINAL_COMPLETE_V39_SHARE_RANKING
 
 
 ## V30_FRAMEHASH - Hash visuel photo + première frame vidéo
@@ -249,7 +249,7 @@ Dépendances ajoutées :
 - opencv-python-headless
 
 Vérification Railway :
-STARTING FINAL_COMPLETE_V38_CALLBACK_FIX
+STARTING FINAL_COMPLETE_V39_SHARE_RANKING
 
 
 ## V31_PURGE - purge complète après média interdit
@@ -277,7 +277,7 @@ Rappels fermeture :
 - 5/4/3/2/1 minutes avant.
 
 Vérification Railway :
-STARTING FINAL_COMPLETE_V38_CALLBACK_FIX
+STARTING FINAL_COMPLETE_V39_SHARE_RANKING
 
 ## V33_VIP_ADS
 
@@ -353,3 +353,18 @@ Correction :
 - protège les edits de vieux panels inline.
 - vérifie que le bouton objectif campagne existe.
 - conserve la V37 globale.
+
+## V39_SHARE_RANKING
+
+Nouveau système :
+- un seul bouton admin `📣 Publicité partage` ;
+- configuration texte + image ;
+- publication avec bouton `🤝 Je partage` ;
+- clic -> bot privé -> lien unique ;
+- classement basé sur toutes les invitations validées existantes ;
+- égalité départagée par score, première validation, création du lien, puis user_id ;
+- Top 10 envoyé au milieu de session si classement ON ;
+- notification privée seulement quand un utilisateur entre dans le Top 10 ;
+- broadcast privé aux personnes qui ont déjà lancé le bot.
+
+Aucune remise à zéro.

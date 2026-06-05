@@ -39,7 +39,7 @@ from telegram.ext import (
     filters,
 )
 
-APP_VERSION = "FINAL_COMPLETE_V40_CLEAN_SHARE"
+APP_VERSION = "FINAL_COMPLETE_V41_PANEL_FIX"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").replace("@", "")
@@ -1057,7 +1057,6 @@ async def panel_text(extra=""):
         f"🥾 Kick non-participants : {led(kick_np)}\n"
         f"🥾 Déjà supprimés non-participation : {kicked_total}\n"
         f"📌 Règles auto : {led(rules_auto)}\n\n"
-        f" : {'✅ complets' if links_ready else '❌ incomplets'}\n"
         f"💬 Messages session stockés : {msg_count}\n"
         f"🚫 Mots interdits : {words}\n"
         f"🚫 Média interdits : {banned_hashes}\n"

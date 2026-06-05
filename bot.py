@@ -39,7 +39,7 @@ from telegram.ext import (
     filters,
 )
 
-APP_VERSION = "FINAL_COMPLETE_V39_SHARE_RANKING"
+APP_VERSION = "FINAL_COMPLETE_V40_CLEAN_SHARE"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").replace("@", "")
@@ -542,18 +542,6 @@ def led(value):
     return "🟢 ON" if value == "on" else "🔴 OFF"
 
 
-def reward_count(valid_count):
-    if valid_count >= 40:
-        return 60
-    if valid_count >= 30:
-        return 50
-    if valid_count >= 5:
-        return 10
-    if valid_count >= 1:
-        return 1
-    return 0
-
-
 def bot_start_url():
     if BOT_USERNAME:
         return f"https://t.me/{BOT_USERNAME}?start=getlink"
@@ -837,11 +825,6 @@ async def insert_banned_media_fingerprints(keys: list[str], mtype: str, reason: 
             await con.execute("DELETE FROM media_hashes WHERE hash=$1", k)
 
 
-async def reward_links_ready():
-    async with db_pool.acquire() as con:
-        c = await con.fetchval("SELECT COUNT(*) FROM reward_links WHERE level IN (1,10,50,60) AND COALESCE(url,'') <> ''")
-    return c == 4
-
 async def upsert_participant(user):
     async with db_pool.acquire() as con:
         await con.execute("""
@@ -979,9 +962,6 @@ async def main_keyboard():
     ad2_enabled = await get_setting("ad2_enabled", "off")
     leaderboard_enabled = await get_setting("leaderboard_enabled", "on")
 
-    links_ok = await reward_links_ready()
-    pub_label = "📢 Publier publicité" if links_ok else "📢 Publicité bloquée : liens manquants"
-
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🛡️ Modération {led(moderation)}", callback_data="toggle:moderation")],
         [InlineKeyboardButton(f"🔗 Anti-liens {led(anti_links)}", callback_data="toggle:anti_links")],
@@ -1001,12 +981,11 @@ async def main_keyboard():
         [InlineKeyboardButton("📌 Modifier règles", callback_data="rules_set")],
         [InlineKeyboardButton("📣 Broadcast groupe", callback_data="broadcast_set")],
         [InlineKeyboardButton("🚫 Ban hash", callback_data="ban_hash_set")],
-        [InlineKeyboardButton("🔗 Liens récompenses", callback_data="reward_links_menu")],
         [InlineKeyboardButton(f"📢 Pub 1 {led(ad1_enabled)}", callback_data="toggle:ad1_enabled"), InlineKeyboardButton("✏️ Texte Pub 1", callback_data="set_ad1_text")],
         [InlineKeyboardButton(f"📢 Pub 2 {led(ad2_enabled)}", callback_data="toggle:ad2_enabled"), InlineKeyboardButton("✏️ Texte Pub 2", callback_data="set_ad2_text")],
         [InlineKeyboardButton("📣 Publicité partage", callback_data="share_publicity_menu")],
+        [InlineKeyboardButton("📢 Broadcast privé", callback_data="broadcast_private_set")],
         [InlineKeyboardButton(f"🏆 Classement {led(leaderboard_enabled)}", callback_data="toggle:leaderboard_enabled")],
-        [InlineKeyboardButton(pub_label, callback_data="publish_ad" if links_ok else "publish_ad_locked")],
         [InlineKeyboardButton("📊 Stats parrainage", callback_data="ref_stats")],
         [InlineKeyboardButton("📣 Relancer non-participants", callback_data="warn_non_participants")],
         [InlineKeyboardButton("ℹ️ Info système", callback_data="info")],
@@ -1024,29 +1003,16 @@ async def words_keyboard():
     ])
 
 
-async def reward_links_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Modifier lien 1 vidéo", callback_data="set_reward_link:1")],
-        [InlineKeyboardButton("Modifier lien 10 vidéos", callback_data="set_reward_link:10")],
-        [InlineKeyboardButton("Modifier lien 50 vidéos", callback_data="set_reward_link:50")],
-        [InlineKeyboardButton("Modifier lien 60 vidéos", callback_data="set_reward_link:60")],
-        [InlineKeyboardButton("📋 Voir liens", callback_data="show_reward_links")],
-        [InlineKeyboardButton("⬅️ Retour", callback_data="info")],
-    ])
-
-
 def back_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Retour", callback_data="info")]])
 
 
 async def panel_text(extra=""):
-    links_ready = await reward_links_ready() if "reward_links_ready" in globals() else False
 
     async with db_pool.acquire() as con:
         msg_count = await con.fetchval("SELECT COUNT(*) FROM messages")
         words = await con.fetchval("SELECT COUNT(*) FROM banned_words")
         valid_refs = await con.fetchval("SELECT COUNT(*) FROM referrals WHERE validated_at IS NOT NULL")
-        links = await con.fetchval("SELECT COUNT(*) FROM referral_links")
         group_open = await con.fetchval("SELECT value FROM settings WHERE key='group_open'")
         moderation = await con.fetchval("SELECT value FROM settings WHERE key='moderation'")
         anti_links = await con.fetchval("SELECT value FROM settings WHERE key='anti_links'")
@@ -1091,12 +1057,11 @@ async def panel_text(extra=""):
         f"🥾 Kick non-participants : {led(kick_np)}\n"
         f"🥾 Déjà supprimés non-participation : {kicked_total}\n"
         f"📌 Règles auto : {led(rules_auto)}\n\n"
-        f"🔗 Liens récompenses : {'✅ complets' if links_ready else '❌ incomplets'}\n"
+        f" : {'✅ complets' if links_ready else '❌ incomplets'}\n"
         f"💬 Messages session stockés : {msg_count}\n"
         f"🚫 Mots interdits : {words}\n"
         f"🚫 Média interdits : {banned_hashes}\n"
         f"🎭 Non-participants : {non_participants}\n"
-        f"🔗 Liens privés : {links}\n"
         f"✅ Parrainages validés : {valid_refs}\n"
     )
     if extra:
@@ -1702,15 +1667,6 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_panel(q, f"session fermée, {deleted} messages supprimés")
         return
 
-    if data == "publish_ad_locked":
-        await q.answer("Il faut d'abord uploader 60 vidéos.", show_alert=True)
-        return
-
-    if data == "publish_ad":
-        ok = await publish_ad(context)
-        await show_panel(q, "publicité publiée" if ok else "60 vidéos requises")
-        return
-
     if data == "words_menu":
         await safe_edit(q, "🚫 MOTS INTERDITS\n\nChoisis une action :", reply_markup=await words_keyboard())
         return
@@ -1827,7 +1783,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✏️ Texte", callback_data="share_pub_set_text"), InlineKeyboardButton("🖼️ Image", callback_data="share_pub_set_image")],
-            [InlineKeyboardButton("📣 Publier publicité", callback_data="publish_share_publicity")],
+            [InlineKeyboardButton("📣 Publier la publicité partage", callback_data="publish_share_publicity")],
             [InlineKeyboardButton("📢 Broadcast privé", callback_data="broadcast_private_set")],
             [InlineKeyboardButton("⬅️ Retour", callback_data="info")]
         ])
@@ -1852,23 +1808,6 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "broadcast_private_set":
         await set_admin_state(q.from_user.id, "broadcast_private")
         await safe_edit(q, "📢 Envoie le message à broadcaster en privé aux personnes qui ont déjà lancé le bot.", reply_markup=back_keyboard())
-        return
-
-    if data == "reward_links_menu":
-        await safe_edit(q, "🔗 LIENS RÉCOMPENSES\n\nChoisis le lien à modifier.", reply_markup=await reward_links_keyboard())
-        return
-
-    if data.startswith("set_reward_link:"):
-        level = data.split(":", 1)[1]
-        await set_admin_state(q.from_user.id, f"set_reward_link:{level}")
-        await safe_edit(q, f"🔗 Envoie maintenant le lien pour le palier {level}.", reply_markup=back_keyboard())
-        return
-
-    if data == "show_reward_links":
-        async with db_pool.acquire() as con:
-            rows = await con.fetch("SELECT level,url FROM reward_links ORDER BY level")
-        txt = "🔗 LIENS RÉCOMPENSES\n\n" + "\n".join([f"{r['level']} : {r['url'] or '❌ vide'}" for r in rows])
-        await safe_edit(q, txt, reply_markup=await reward_links_keyboard())
         return
 
     if data == "warn_non_participants":
@@ -2035,32 +1974,6 @@ async def close_group_and_clean(context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- PUBLICITY / REFERRAL ----------------
 
-async def publish_ad(context: ContextTypes.DEFAULT_TYPE):
-    if not await reward_links_ready():
-        return False
-
-    old_id = int(await get_setting("ad_message_id", "0") or "0")
-    if old_id:
-        await delete_message_safe(context, GROUP_ID, old_id)
-
-    text = (
-        "🎁 Partagez votre lien pour recevoir la rediffusion complète du groupe.\n\n"
-        "\n"
-        "\n"
-        "\n"
-        "\n\n"
-        "Cliquez sur « Je partage » pour recevoir votre lien personnel."
-    )
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎁 Recevoir mon lien privé", url=bot_start_url())]
-    ])
-
-    msg = await context.bot.send_message(GROUP_ID, text, reply_markup=keyboard)
-    await set_setting("ad_message_id", msg.message_id)
-    return True
-
-
 async def send_referral_link_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_share_link_private(update, context)
 
@@ -2099,19 +2012,6 @@ async def validate_join_later(context: ContextTypes.DEFAULT_TYPE, invited_user_i
         await con.execute("DELETE FROM pending_joins WHERE invited_user_id=$1", invited_user_id)
     await deliver_campaign_reward_if_ready(context, referrer_id)
     await notify_top10_changes(context)
-
-
-async def send_reward_link(context: ContextTypes.DEFAULT_TYPE, user_id: int, level: int):
-    async with db_pool.acquire() as con:
-        row = await con.fetchrow("SELECT url FROM reward_links WHERE level=$1", level)
-    if not row or not row["url"]:
-        return
-    try:
-        await context.bot.send_message(user_id, f"{MSG_REWARD_UNLOCKED}\n{row['url']}")
-    except Forbidden:
-        print(f"Cannot send reward link to {user_id}: user did not start bot", flush=True)
-    except Exception as e:
-        print(f"SEND REWARD LINK ERROR {user_id}: {e}", flush=True)
 
 
 # ---------------- PRIVATE ADMIN ----------------
@@ -2156,18 +2056,6 @@ async def handle_private_admin(update: Update, context: ContextTypes.DEFAULT_TYP
         await save_message(GROUP_ID, sent.message_id, None, True)
         await set_admin_state(user.id, None)
         await msg.reply_text("✅ Broadcast envoyé dans le groupe.")
-        return
-
-    if state and state.startswith("set_reward_link:"):
-        level = int(state.split(":", 1)[1])
-        async with db_pool.acquire() as con:
-            await con.execute("""
-            INSERT INTO reward_links(level,url,updated_at)
-            VALUES($1,$2,NOW())
-            ON CONFLICT(level) DO UPDATE SET url=$2, updated_at=NOW()
-            """, level, text)
-        await set_admin_state(user.id, None)
-        await msg.reply_text(f"✅ Lien palier {level} mis à jour.")
         return
 
     if state == "set_ad1_text":

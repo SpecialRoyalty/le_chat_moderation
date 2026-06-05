@@ -39,7 +39,7 @@ from telegram.ext import (
     filters,
 )
 
-APP_VERSION = "FINAL_COMPLETE_V42_PRIVATE_RANK"
+APP_VERSION = "FINAL_COMPLETE_V43_CALLBACK_RECURSION_FIX"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").replace("@", "")
@@ -1079,12 +1079,14 @@ async def table_has_setting(key):
 
 async def safe_answer_callback(q):
     try:
-        await safe_answer_callback(q)
+        # IMPORTANT: must call Telegram's original callback answer.
+        # Do NOT call safe_answer_callback(q) here, otherwise infinite recursion.
+        await q.answer()
     except BadRequest as e:
         if "Query is too old" in str(e) or "query id is invalid" in str(e):
             print("CALLBACK ANSWER SKIPPED: old query", flush=True)
             return
-        raise
+        print(f"CALLBACK ANSWER ERROR: {e}", flush=True)
     except Exception as e:
         print(f"CALLBACK ANSWER SKIPPED: {e}", flush=True)
 
@@ -1723,6 +1725,12 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(q, f"📋 MOTS INTERDITS\n\n{words}", reply_markup=await words_keyboard())
         return
 
+
+    if data == "toggle_silent":
+        cur = await get_setting("silent_sanctions", "off")
+        await set_setting("silent_sanctions", "off" if cur == "on" else "on")
+        await show_panel(q, "sanctions silencieuses mises à jour")
+        return
 
     if data == "toggle_raid":
         current = await get_setting("raid_mode", "off")

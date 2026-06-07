@@ -39,12 +39,13 @@ from telegram.ext import (
     filters,
 )
 
-APP_VERSION = "FINAL_COMPLETE_V43_CALLBACK_RECURSION_FIX"
+APP_VERSION = "FINAL_COMPLETE_V44_SUPER_TRUSTED"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").replace("@", "")
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 TRUSTED_IDS = [int(x.strip()) for x in os.getenv("TRUSTED_IDS", "").split(",") if x.strip()]
+SUPER_TRUSTED_IDS = [int(x.strip()) for x in os.getenv("SUPER_TRUSTED_IDS", "").split(",") if x.strip()]
 GROUP_ID = int(os.getenv("GROUP_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -526,6 +527,14 @@ def is_admin(user_id):
 
 def is_trusted_id(user_id):
     return user_id in ADMIN_IDS or user_id in TRUSTED_IDS
+
+def is_super_trusted(user_id: int) -> bool:
+    return user_id in SUPER_TRUSTED_IDS or is_admin(user_id)
+
+
+def is_trusted_or_super(user_id: int) -> bool:
+    return user_id in TRUSTED_IDS or user_id in SUPER_TRUSTED_IDS or is_admin(user_id)
+
 
 
 async def is_group_admin(context, user_id: int) -> bool:
@@ -1201,7 +1210,7 @@ async def trusted_supprime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not actor:
         return
 
-    if not is_trusted_id(actor.id):
+    if not is_trusted_or_super(actor.id):
         await delete_message_safe(context, msg.chat_id, msg.message_id)
         return
 
@@ -1260,7 +1269,7 @@ async def trusted_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not actor:
         return
 
-    if not is_trusted_id(actor.id):
+    if not is_trusted_or_super(actor.id):
         await delete_message_safe(context, msg.chat_id, msg.message_id)
         return
 
@@ -1648,6 +1657,108 @@ async def send_share_link_private(update: Update, context: ContextTypes.DEFAULT_
 
 
 
+
+async def super_trusted_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👀 Voir mots interdits", callback_data="st_words_list")],
+        [InlineKeyboardButton("➕ Ajouter mot interdit", callback_data="st_word_add")],
+        [InlineKeyboardButton("📊 Stats 7 jours", callback_data="st_stats_7d")],
+        [InlineKeyboardButton("📈 Historique complet", callback_data="st_stats_all")],
+    ])
+
+
+async def resolve_user_display_name(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    try:
+        member = await context.bot.get_chat_member(GROUP_ID, user_id)
+        u = member.user
+        if u.username:
+            return "@" + u.username
+        name = " ".join([x for x in [u.first_name, u.last_name] if x])
+        if name.strip():
+            return name.strip()
+    except Exception:
+        pass
+
+    async with db_pool.acquire() as con:
+        row = await con.fetchrow("""
+        SELECT username, first_name FROM participants WHERE user_id=$1
+        UNION ALL
+        SELECT username, first_name FROM private_users WHERE user_id=$1
+        LIMIT 1
+        """, user_id)
+    if row:
+        if row["username"]:
+            return "@" + row["username"]
+        if row["first_name"]:
+            return row["first_name"]
+    return "Utilisateur inconnu"
+
+
+async def build_trusted_stats_text(context: ContextTypes.DEFAULT_TYPE, days=None):
+    where = ""
+    title = "📈 Historique complet"
+    if days:
+        where = f"WHERE created_at >= NOW() - INTERVAL '{int(days)} days'"
+        title = f"📊 {int(days)} derniers jours glissants"
+
+    async with db_pool.acquire() as con:
+        rows = await con.fetch(f"""
+        SELECT trusted_id, COUNT(*) AS total
+        FROM trusted_actions
+        {where}
+        GROUP BY trusted_id
+        ORDER BY total DESC
+        """)
+
+    if not rows:
+        return title + "\n\nAucune intervention enregistrée."
+
+    total = sum(int(r["total"] or 0) for r in rows)
+    lines = [title, "", f"Total interventions : {total}", ""]
+    for r in rows:
+        name = await resolve_user_display_name(context, r["trusted_id"])
+        lines.append(f"• {name} : {int(r['total'] or 0)}")
+    return "\n".join(lines)
+
+
+async def build_session_trusted_report(context: ContextTypes.DEFAULT_TYPE):
+    sid = await get_session_for_trusted()
+    async with db_pool.acquire() as con:
+        rows = await con.fetch("""
+        SELECT trusted_id, action, COUNT(*) AS total
+        FROM trusted_actions
+        WHERE session_id=$1
+        GROUP BY trusted_id, action
+        ORDER BY trusted_id, action
+        """, sid)
+
+    if not rows:
+        return "📊 Rapport trusted session\n\nAucune intervention enregistrée."
+
+    by_user = {}
+    for r in rows:
+        by_user.setdefault(r["trusted_id"], []).append((r["action"], int(r["total"] or 0)))
+
+    total = sum(n for actions in by_user.values() for _, n in actions)
+    lines = ["📊 Rapport trusted session", "", f"Total interventions : {total}", ""]
+    for uid, actions in by_user.items():
+        name = await resolve_user_display_name(context, uid)
+        detail = ", ".join([f"{a}: {n}" for a, n in actions])
+        lines.append(f"• {name} : {sum(n for _, n in actions)} ({detail})")
+    return "\n".join(lines)
+
+
+async def send_super_trusted_report(context: ContextTypes.DEFAULT_TYPE, label: str):
+    if not SUPER_TRUSTED_IDS:
+        return
+    text = f"{label}\n\n{await build_session_trusted_report(context)}"
+    for uid in SUPER_TRUSTED_IDS:
+        try:
+            await context.bot.send_message(uid, text)
+        except Exception as e:
+            print(f"SUPER TRUSTED REPORT SEND ERROR user={uid}: {e}", flush=True)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await track_private_user(user)
@@ -1668,6 +1779,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_admin(user.id):
         await set_admin_state(user.id, None)
         await update.message.reply_text(await panel_text(), reply_markup=await main_keyboard())
+    elif user.id in SUPER_TRUSTED_IDS:
+        await set_admin_state(user.id, None)
+        await update.message.reply_text("🛡️ Panel Super Trusted", reply_markup=await super_trusted_keyboard())
     else:
         await update.message.reply_text("Cliquez sur le bouton « Je partage » dans le groupe pour recevoir votre lien personnel.")
 
@@ -1696,11 +1810,13 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "open_group":
         await open_group(context)
+        await send_super_trusted_report(context, "🟢 Ouverture du groupe")
         await show_panel(q, "session ouverte")
         return
 
     if data == "close_group":
         deleted = await close_group_and_clean(context)
+        await send_super_trusted_report(context, "🔴 Fermeture du groupe")
         await show_panel(q, f"session fermée, {deleted} messages supprimés")
         return
 
@@ -1816,6 +1932,38 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "publish_campaign_ad":
         await publish_campaign_ad(context)
         await safe_edit(q, await panel_text("Campagne publiée"), reply_markup=await main_keyboard())
+        return
+
+    if data == "st_words_list":
+        if q.from_user.id not in SUPER_TRUSTED_IDS and not is_admin(q.from_user.id):
+            await safe_edit(q, "⛔ Accès refusé.")
+            return
+        async with db_pool.acquire() as con:
+            rows = await con.fetch("SELECT word FROM banned_words ORDER BY word ASC")
+        txt = "📖 Mots interdits\n\n" + ("\n".join([f"• {r['word']}" for r in rows]) if rows else "Aucun mot enregistré.")
+        await safe_edit(q, txt, reply_markup=await super_trusted_keyboard())
+        return
+
+    if data == "st_word_add":
+        if q.from_user.id not in SUPER_TRUSTED_IDS and not is_admin(q.from_user.id):
+            await safe_edit(q, "⛔ Accès refusé.")
+            return
+        await set_admin_state(q.from_user.id, "st_adding_word")
+        await safe_edit(q, "➕ Envoie maintenant le mot à ajouter.", reply_markup=await super_trusted_keyboard())
+        return
+
+    if data == "st_stats_7d":
+        if q.from_user.id not in SUPER_TRUSTED_IDS and not is_admin(q.from_user.id):
+            await safe_edit(q, "⛔ Accès refusé.")
+            return
+        await safe_edit(q, await build_trusted_stats_text(context, days=7), reply_markup=await super_trusted_keyboard())
+        return
+
+    if data == "st_stats_all":
+        if q.from_user.id not in SUPER_TRUSTED_IDS and not is_admin(q.from_user.id):
+            await safe_edit(q, "⛔ Accès refusé.")
+            return
+        await safe_edit(q, await build_trusted_stats_text(context, days=None), reply_markup=await super_trusted_keyboard())
         return
 
     if data == "share_publicity_menu":
@@ -2062,11 +2210,30 @@ async def validate_join_later(context: ContextTypes.DEFAULT_TYPE, invited_user_i
 async def handle_private_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     msg = update.message
-    if not user or not msg or not is_admin(user.id):
+    if not user or not msg or (not is_admin(user.id) and user.id not in SUPER_TRUSTED_IDS):
         return
 
     state = await get_admin_state(user.id)
     text = (msg.text or "").strip()
+
+    if state == "st_adding_word":
+        if user.id not in SUPER_TRUSTED_IDS and not is_admin(user.id):
+            await msg.reply_text("⛔ Accès refusé.")
+            await set_admin_state(user.id, None)
+            return
+        word = text.lower().strip()
+        if not word:
+            await msg.reply_text("❌ Mot vide.")
+            return
+        async with db_pool.acquire() as con:
+            await con.execute("""
+            INSERT INTO banned_words(word,created_at)
+            VALUES($1,NOW())
+            ON CONFLICT(word) DO NOTHING
+            """, word)
+        await set_admin_state(user.id, None)
+        await msg.reply_text("✅ Mot interdit ajouté.")
+        return
 
     if state == "adding_word":
         word = text.lower()
@@ -2258,7 +2425,7 @@ async def trusted_pasfr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not actor:
         return
 
-    if not is_trusted_id(actor.id):
+    if not is_trusted_or_super(actor.id):
         await delete_message_safe(context, msg.chat_id, msg.message_id)
         until = datetime.now(TZ) + timedelta(days=2)
         try:
@@ -2432,7 +2599,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     admin_exempt = await is_group_admin(context, user.id)
 
     # 2) Les autres commandes / sont supprimées. Récidive = mute 1 mois.
-    if msg.text and msg.text.startswith("/") and not admin_exempt and not is_trusted_id(user.id):
+    if msg.text and msg.text.startswith("/") and not admin_exempt and not is_trusted_or_super(user.id):
         await delete_message_safe(context, GROUP_ID, msg.message_id)
         async with db_pool.acquire() as con:
             row = await con.fetchrow("SELECT score FROM danger_scores WHERE user_id=$1", user.id)
@@ -2972,12 +3139,14 @@ async def hourly_job(context: ContextTypes.DEFAULT_TYPE):
     if should_be_open and group_open != "on":
         await set_setting("last_countdown_key", "")
         await open_group(context)
+        await send_super_trusted_report(context, "🟢 Ouverture du groupe")
         await warn_non_participants(context)
         return
 
     if not should_be_open and group_open == "on":
         await set_setting("last_countdown_key", "")
         await close_group_and_clean(context)
+        await send_super_trusted_report(context, "🔴 Fermeture du groupe")
         return
 
     # Groupe fermé : countdown vers la prochaine ouverture réelle.

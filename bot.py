@@ -2490,7 +2490,7 @@ async def trusted_pasfr(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # PUBLIC MESSAGES V24
 # =========================
 
-MSG_PARTICIPATION_REQUIRED = "⚠️ Merci de participer avant d’envoyer un message.\nEnvoyez au moins 1 photo ou 1 vidéo jamais publiée."
+MSG_PARTICIPATION_REQUIRED = "⚠️ Merci de participer avant d’envoyer un message."
 MSG_REPOST = "♻️ Ce média a déjà été publié."
 MSG_LINK_FORBIDDEN = "🔗 Les liens ne sont pas autorisés."
 MSG_FORWARD_FORBIDDEN = "🚫 Les transferts ne sont pas autorisés."
@@ -2819,11 +2819,7 @@ async def warn_non_participants(context):
         txt = (
             "⚠️ Veuillez participer si vous voulez rester dans le groupe.\n"
             "Envoyez au moins 1 photo ou 1 vidéo jamais publiée.\n\n"
-            "✅ Une seule participation valide suffit pour rester définitivement.\n\n"
-            "Si vous ne participez pas, vous serez supprimé du groupe sous peu.\n\n"
-            f"🥾 Déjà supprimés pour non-participation : {kicked_total}\n"
-            f"🥾 Kick automatique : {'ON' if kick_np == 'on' else 'OFF'}\n"
-            "Limite : 20 suppressions / jour\n\n"
+            "✅ Sinon vous serrez écarté du groupe.\n\n"
         )
         txt += " ".join(mentions)
 

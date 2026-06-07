@@ -39,7 +39,7 @@ from telegram.ext import (
     filters,
 )
 
-APP_VERSION = "FINAL_COMPLETE_V44_SUPER_TRUSTED"
+APP_VERSION = "FINAL_COMPLETE_V45_SUPER_TRUSTED_PANEL_FIX"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").replace("@", "")
@@ -1790,10 +1790,48 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await safe_answer_callback(q)
 
-    if not q.from_user or not is_admin(q.from_user.id):
+    if not q or not q.from_user:
         return
 
     data = q.data
+
+    # Super Trusted panel: allowed before admin-only guard.
+    if data == "st_words_list":
+        if q.from_user.id not in SUPER_TRUSTED_IDS and not is_admin(q.from_user.id):
+            await safe_edit(q, "⛔ Accès refusé.")
+            return
+        async with db_pool.acquire() as con:
+            rows = await con.fetch("SELECT word FROM banned_words ORDER BY word ASC")
+        txt = "📖 Mots interdits\n\n" + ("\n".join([f"• {r['word']}" for r in rows]) if rows else "Aucun mot enregistré.")
+        await safe_edit(q, txt, reply_markup=await super_trusted_keyboard())
+        return
+
+    if data == "st_word_add":
+        if q.from_user.id not in SUPER_TRUSTED_IDS and not is_admin(q.from_user.id):
+            await safe_edit(q, "⛔ Accès refusé.")
+            return
+        await set_admin_state(q.from_user.id, "st_adding_word")
+        await safe_edit(q, "➕ Envoie maintenant le mot à ajouter.", reply_markup=await super_trusted_keyboard())
+        return
+
+    if data == "st_stats_7d":
+        if q.from_user.id not in SUPER_TRUSTED_IDS and not is_admin(q.from_user.id):
+            await safe_edit(q, "⛔ Accès refusé.")
+            return
+        await safe_edit(q, await build_trusted_stats_text(context, days=7), reply_markup=await super_trusted_keyboard())
+        return
+
+    if data == "st_stats_all":
+        if q.from_user.id not in SUPER_TRUSTED_IDS and not is_admin(q.from_user.id):
+            await safe_edit(q, "⛔ Accès refusé.")
+            return
+        await safe_edit(q, await build_trusted_stats_text(context, days=None), reply_markup=await super_trusted_keyboard())
+        return
+
+    # Everything else in this panel remains admin-only.
+    if not is_admin(q.from_user.id):
+        return
+
 
     if data.startswith("toggle:"):
         key = data.split(":", 1)[1]
@@ -1932,38 +1970,6 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "publish_campaign_ad":
         await publish_campaign_ad(context)
         await safe_edit(q, await panel_text("Campagne publiée"), reply_markup=await main_keyboard())
-        return
-
-    if data == "st_words_list":
-        if q.from_user.id not in SUPER_TRUSTED_IDS and not is_admin(q.from_user.id):
-            await safe_edit(q, "⛔ Accès refusé.")
-            return
-        async with db_pool.acquire() as con:
-            rows = await con.fetch("SELECT word FROM banned_words ORDER BY word ASC")
-        txt = "📖 Mots interdits\n\n" + ("\n".join([f"• {r['word']}" for r in rows]) if rows else "Aucun mot enregistré.")
-        await safe_edit(q, txt, reply_markup=await super_trusted_keyboard())
-        return
-
-    if data == "st_word_add":
-        if q.from_user.id not in SUPER_TRUSTED_IDS and not is_admin(q.from_user.id):
-            await safe_edit(q, "⛔ Accès refusé.")
-            return
-        await set_admin_state(q.from_user.id, "st_adding_word")
-        await safe_edit(q, "➕ Envoie maintenant le mot à ajouter.", reply_markup=await super_trusted_keyboard())
-        return
-
-    if data == "st_stats_7d":
-        if q.from_user.id not in SUPER_TRUSTED_IDS and not is_admin(q.from_user.id):
-            await safe_edit(q, "⛔ Accès refusé.")
-            return
-        await safe_edit(q, await build_trusted_stats_text(context, days=7), reply_markup=await super_trusted_keyboard())
-        return
-
-    if data == "st_stats_all":
-        if q.from_user.id not in SUPER_TRUSTED_IDS and not is_admin(q.from_user.id):
-            await safe_edit(q, "⛔ Accès refusé.")
-            return
-        await safe_edit(q, await build_trusted_stats_text(context, days=None), reply_markup=await super_trusted_keyboard())
         return
 
     if data == "share_publicity_menu":

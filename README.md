@@ -1,4 +1,4 @@
-# FINAL_CLEAN_V1_FROM_SCRATCH
+# FINAL_CLEAN_V2_SESSIONS_NONPARTICIPANTS
 
 Version propre recodée depuis le cahier des charges validé.
 
@@ -65,3 +65,6 @@ SELFTEST OK
 - Anciens liens récompenses.
 - Ancienne campagne GoFile.
 - Ancien doublon publier publicité.
+
+## V2
+Sessions, info système, auto-test, non-participants, messages 30s.

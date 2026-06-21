@@ -12,7 +12,7 @@ try:
 except Exception:
     cv2 = None
 
-APP_VERSION='FINAL_CLEAN_V1_FROM_SCRATCH'
+APP_VERSION='FINAL_CLEAN_V2_SESSIONS_NONPARTICIPANTS'
 BOT_TOKEN=os.getenv('BOT_TOKEN','').strip(); DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 GROUP_ID=int(os.getenv('GROUP_ID','0') or '0'); BOT_USERNAME=os.getenv('BOT_USERNAME','').strip().lstrip('@')
 TZ=ZoneInfo(os.getenv('TZ','Europe/Paris'))
@@ -24,13 +24,13 @@ MAX_HASH_DOWNLOAD_BYTES=int(os.getenv('MAX_HASH_DOWNLOAD_BYTES',str(20*1024*1024
 GROUP_ANONYMOUS_BOT_ID=1087968824
 db_pool=None
 
-MSG_PARTICIPATION_REQUIRED='⚠️ {mention}, merci de participer avant d’envoyer un message.\nEnvoyez au moins 1 photo ou 1 vidéo jamais publiée.'
+MSG_PARTICIPATION_REQUIRED='⚠️ {mention}, merci de participer avant d’envoyer un message.'
 MSG_REPOST='♻️ Ce média a déjà été publié.'; MSG_LINK_FORBIDDEN='🔗 Les liens ne sont pas autorisés.'
 MSG_FORWARD_FORBIDDEN='🚫 Les transferts texte ne sont pas autorisés.'; MSG_GENERIC_FORBIDDEN='🚫 Message non autorisé.'
 MSG_FAKE_COMMAND='🔇 Commande réservée à la modération. Si vous essayez, vous êtes sanctionné.'
 MSG_PASFR='⚠️ Merci d’envoyer uniquement du contenu FR.'; MSG_PUB_ATTEMPT='🚫 Tentative de publicité interdite.'
 
-DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':''}
+DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','nonparticipant_enabled':'on','nonparticipant_threshold_open_days':'3','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':''}
 TABLES=[
 "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)",
 "CREATE TABLE IF NOT EXISTS admin_states(user_id BIGINT PRIMARY KEY,state TEXT,payload TEXT,updated_at TIMESTAMP DEFAULT NOW())",
@@ -54,7 +54,9 @@ TABLES=[
 "CREATE TABLE IF NOT EXISTS referrer_abuse(referrer_id BIGINT PRIMARY KEY,bad_invites INTEGER DEFAULT 0,warned BOOLEAN DEFAULT FALSE,blacklisted BOOLEAN DEFAULT FALSE,updated_at TIMESTAMP DEFAULT NOW())",
 "CREATE TABLE IF NOT EXISTS private_users(user_id BIGINT PRIMARY KEY,username TEXT,first_name TEXT,last_name TEXT,created_at TIMESTAMP DEFAULT NOW(),updated_at TIMESTAMP DEFAULT NOW())",
 "CREATE TABLE IF NOT EXISTS leaderboard_rank_cache(user_id BIGINT PRIMARY KEY,rank INTEGER,count INTEGER,updated_at TIMESTAMP DEFAULT NOW())",
-"CREATE TABLE IF NOT EXISTS system_messages(chat_id BIGINT,message_id BIGINT,created_at TIMESTAMP DEFAULT NOW(),PRIMARY KEY(chat_id,message_id))"]
+"CREATE TABLE IF NOT EXISTS system_messages(chat_id BIGINT,message_id BIGINT,created_at TIMESTAMP DEFAULT NOW(),PRIMARY KEY(chat_id,message_id))",
+"CREATE TABLE IF NOT EXISTS nonparticipant_seen(user_id BIGINT,session_id INTEGER,username TEXT,first_name TEXT,last_seen_at TIMESTAMP DEFAULT NOW(),PRIMARY KEY(user_id,session_id))",
+"CREATE TABLE IF NOT EXISTS nonparticipant_kick_messages(chat_id BIGINT,message_id BIGINT,session_id INTEGER,created_at TIMESTAMP DEFAULT NOW(),PRIMARY KEY(chat_id,message_id))"]
 
 def is_admin(uid:int)->bool: return uid in ADMIN_IDS
 def is_super_trusted(uid:int)->bool: return uid in SUPER_TRUSTED_IDS or is_admin(uid)
@@ -138,13 +140,13 @@ async def delete_safe(ctx,chat_id,msg_id):
     except BadRequest as e: print(f'DELETE SKIPPED/CLEANED {msg_id}: {e}',flush=True)
     except Exception as e: print(f'DELETE ERROR {msg_id}: {e}',flush=True)
 async def delete_later(ctx,chat_id,msg_id,seconds): await asyncio.sleep(seconds); await delete_safe(ctx,chat_id,msg_id)
-async def warning(ctx,text,seconds=180,force=False):
+async def warning(ctx,text,seconds=30,force=False):
     if not force and not await visible(): return None
     try:
         m=await ctx.bot.send_message(GROUP_ID,text); await save_message(GROUP_ID,m.message_id,None,True); ctx.application.create_task(delete_later(ctx,GROUP_ID,m.message_id,seconds)); return m
     except Exception as e: print(f'WARNING SEND ERROR: {e}',flush=True); return None
 async def participation_warning(ctx,user):
-    await warning(ctx,MSG_PARTICIPATION_REQUIRED.format(mention=display(user)),10,True); print(f'PARTICIPATION WARNING SENT user={user.id}',flush=True)
+    await warning(ctx,MSG_PARTICIPATION_REQUIRED.format(mention=display(user)),30,True); print(f'PARTICIPATION WARNING SENT user={user.id}',flush=True)
 async def notify_admins(ctx,text):
     for uid in set(ADMIN_IDS)|set(SUPER_TRUSTED_IDS):
         try: await ctx.bot.send_message(uid,text)
@@ -168,14 +170,14 @@ async def punish_ban(update,ctx,reason,public_msg=MSG_GENERIC_FORBIDDEN):
     if is_protected_user(user.id): await delete_safe(ctx,GROUP_ID,msg.message_id); print(f'PROTECTED AUTO BAN SKIPPED user={user.id} reason={reason}',flush=True); return
     try: await ctx.bot.ban_chat_member(GROUP_ID,user.id); await inc_counter('session_exclusions'); print(f'AUTO BAN user={user.id} reason={reason}',flush=True)
     except Exception as e: print(f'BAN ERROR user={user.id}: {e}',flush=True)
-    await purge_user(ctx,user.id); await delete_safe(ctx,GROUP_ID,msg.message_id); await add_danger(user.id,10,reason); await warning(ctx,public_msg)
+    await purge_user(ctx,user.id); await delete_safe(ctx,GROUP_ID,msg.message_id); await add_danger(user.id,10,reason); await warning(ctx,public_msg,30)
 async def punish_word(update,ctx,word):
     user=update.effective_user; msg=update.effective_message
     if not user or not msg or is_protected_user(user.id): return
     await delete_safe(ctx,GROUP_ID,msg.message_id); days=1 if await has_participated(user.id) else 3
     try: await restrict_days(ctx,user.id,days,f'mot interdit:{word}'); await inc_counter('session_mutes'); print(f'WORD FORBIDDEN MATCH user={user.id} word={word} mute_days={days}',flush=True)
     except Exception as e: print(f'WORD MUTE ERROR user={user.id}: {e}',flush=True)
-    await add_danger(user.id,3,f'mot interdit:{word}'); await warning(ctx,MSG_GENERIC_FORBIDDEN)
+    await add_danger(user.id,3,f'mot interdit:{word}'); await warning(ctx,MSG_GENERIC_FORBIDDEN,30)
 async def fake_command(update,ctx):
     user=update.effective_user; msg=update.effective_message
     if not user or not msg: return
@@ -183,7 +185,113 @@ async def fake_command(update,ctx):
     if is_protected_user(user.id): return
     try: await restrict_days(ctx,user.id,2,'fake command'); await inc_counter('session_mutes')
     except Exception as e: print(f'FAKE COMMAND MUTE ERROR user={user.id}: {e}',flush=True)
-    await warning(ctx,MSG_FAKE_COMMAND)
+    await warning(ctx,MSG_FAKE_COMMAND,30,True)
+
+
+# sessions / nonparticipants / info
+async def get_open_session():
+    async with db_pool.acquire() as con:
+        return await con.fetchrow('SELECT * FROM sessions WHERE is_open=TRUE ORDER BY id DESC LIMIT 1')
+async def open_session_admin(ctx=None):
+    async with db_pool.acquire() as con:
+        row=await con.fetchrow('SELECT id FROM sessions WHERE is_open=TRUE ORDER BY id DESC LIMIT 1')
+        if row: return int(row['id'])
+        sid=await con.fetchval('INSERT INTO sessions(opened_at,is_open,session_deletions,session_exclusions,session_mutes) VALUES(NOW(),TRUE,0,0,0) RETURNING id')
+    print(f'SESSION OPEN #{sid}',flush=True)
+    if ctx: await send_super_trusted_report(ctx, f'🟢 Session ouverte #{sid}')
+    return int(sid)
+async def close_session_admin(ctx=None):
+    async with db_pool.acquire() as con:
+        row=await con.fetchrow('SELECT id FROM sessions WHERE is_open=TRUE ORDER BY id DESC LIMIT 1')
+        if not row: return None
+        sid=int(row['id']); await con.execute('UPDATE sessions SET is_open=FALSE,closed_at=NOW() WHERE id=$1',sid)
+    print(f'SESSION CLOSE #{sid}',flush=True)
+    if ctx:
+        await cleanup_nonparticipant_kick_messages(ctx,sid)
+        await send_super_trusted_report(ctx, f'🔴 Session fermée #{sid}')
+    return sid
+async def track_open_session_presence(user):
+    if not user or is_system_or_anonymous_user(user) or is_protected_user(user.id): return
+    sess=await get_open_session()
+    if not sess: return
+    async with db_pool.acquire() as con:
+        await con.execute('INSERT INTO nonparticipant_seen(user_id,session_id,username,first_name,last_seen_at) VALUES($1,$2,$3,$4,NOW()) ON CONFLICT(user_id,session_id) DO UPDATE SET username=$3,first_name=$4,last_seen_at=NOW()',user.id,int(sess['id']),getattr(user,'username',None),getattr(user,'first_name',None))
+async def eligible_nonparticipants(limit=None):
+    th=int(await get_setting('nonparticipant_threshold_open_days','3') or '3')
+    sql="""SELECT ns.user_id,MAX(ns.username) username,MAX(ns.first_name) first_name,COUNT(DISTINCT ns.session_id) open_days,MIN(ns.session_id) first_session FROM nonparticipant_seen ns LEFT JOIN participants p ON p.user_id=ns.user_id WHERE p.user_id IS NULL GROUP BY ns.user_id HAVING COUNT(DISTINCT ns.session_id)>=$1 ORDER BY MIN(ns.session_id),ns.user_id"""
+    if limit: sql+=f' LIMIT {int(limit)}'
+    async with db_pool.acquire() as con: rows=await con.fetch(sql,th)
+    print(f'NON_PARTICIPANT_SCAN threshold={th} eligible={len(rows)}',flush=True); return rows
+async def count_nonparticipant_seen():
+    async with db_pool.acquire() as con: return int(await con.fetchval('SELECT COUNT(DISTINCT user_id) FROM nonparticipant_seen') or 0)
+async def send_nonparticipant_prompt(ctx,admin_id):
+    rows=await eligible_nonparticipants(); await set_state(admin_id,'nonparticipant_kick_count')
+    await ctx.bot.send_message(admin_id,f'📊 Non-participants détectés\n\n{len(rows)} comptes éligibles.\n\nCombien souhaitez-vous expulser ?\nRépondez par un chiffre. Si vous ne répondez rien, aucune action.')
+async def kick_nonparticipants_public(ctx,count):
+    rows=await eligible_nonparticipants(count); sess=await get_open_session(); sid=int(sess['id']) if sess else None; kicked=0
+    for r in rows:
+        uid=int(r['user_id'])
+        if is_protected_user(uid): continue
+        name='@'+r['username'] if r['username'] else (r['first_name'] or 'Utilisateur')
+        try:
+            m=await ctx.bot.send_message(GROUP_ID,f'🚪 Expulsion pour non participation\n\nUtilisateur : {name}')
+            await save_message(GROUP_ID,m.message_id,None,True)
+            if sid:
+                async with db_pool.acquire() as con: await con.execute('INSERT INTO nonparticipant_kick_messages(chat_id,message_id,session_id,created_at) VALUES($1,$2,$3,NOW()) ON CONFLICT(chat_id,message_id) DO NOTHING',GROUP_ID,m.message_id,sid)
+            await ctx.bot.ban_chat_member(GROUP_ID,uid); await asyncio.sleep(.2); await ctx.bot.unban_chat_member(GROUP_ID,uid,only_if_banned=True)
+            kicked+=1; print(f'NON_PARTICIPANT_KICKED user={uid}',flush=True); await asyncio.sleep(.4)
+        except Exception as e: print(f'NON_PARTICIPANT_KICK ERROR user={uid}: {e}',flush=True)
+    try:
+        m=await ctx.bot.send_message(GROUP_ID,'⚠️ La participation est obligatoire.\n\nSi vous ne voulez pas être expulsé prochainement, merci de participer.')
+        await save_message(GROUP_ID,m.message_id,None,True)
+        if sid:
+            async with db_pool.acquire() as con: await con.execute('INSERT INTO nonparticipant_kick_messages(chat_id,message_id,session_id,created_at) VALUES($1,$2,$3,NOW()) ON CONFLICT(chat_id,message_id) DO NOTHING',GROUP_ID,m.message_id,sid)
+    except Exception as e: print(f'NON_PARTICIPANT FINAL WARNING ERROR: {e}',flush=True)
+    return kicked
+async def cleanup_nonparticipant_kick_messages(ctx,session_id):
+    async with db_pool.acquire() as con: rows=await con.fetch('SELECT chat_id,message_id FROM nonparticipant_kick_messages WHERE session_id=$1',session_id)
+    for r in rows: await delete_safe(ctx,r['chat_id'],r['message_id']); await asyncio.sleep(.02)
+    async with db_pool.acquire() as con: await con.execute('DELETE FROM nonparticipant_kick_messages WHERE session_id=$1',session_id)
+async def build_system_info(ctx):
+    lines=['ℹ️ Info système','',f'Version : {APP_VERSION}']
+    try:
+        async with db_pool.acquire() as con:
+            await con.fetchval('SELECT 1'); tables=await con.fetch("SELECT tablename FROM pg_tables WHERE schemaname='public'")
+            lines+=['Database : ✅ OK',f'Tables : {len(tables)}']
+            for t in ['banned_words','banned_words_hard','forbidden_usernames','banned_hashes','media_hashes','participants','private_users','nonparticipant_seen']:
+                try: c=int(await con.fetchval(f'SELECT COUNT(*) FROM {t}') or 0)
+                except Exception: c=-1
+                lines.append(f'{t} : {c}')
+    except Exception as e: lines.append(f'Database : ❌ ERROR {e}')
+    try:
+        me=await ctx.bot.get_me(); m=await ctx.bot.get_chat_member(GROUP_ID,me.id); lines.append(f'Groupe principal : ✅ {m.status}')
+    except Exception as e: lines.append(f'Groupe principal : ❌ {e}')
+    if REDIFFUSION_GROUP_ID:
+        ok,msg=await validate_rediff(ctx); lines.append(f"Rediffusion : {'✅' if ok else '❌'} {msg}")
+    else: lines.append('Rediffusion : ⚪ non configurée')
+    sess=await get_open_session(); lines.append(f"Session : {'🟢 ouverte #'+str(sess['id']) if sess else '🔴 fermée'}")
+    lines.append(f'Non-participants suivis : {await count_nonparticipant_seen()}')
+    lines.append(f'Éligibles expulsion : {len(await eligible_nonparticipants())}')
+    lines.append(f"Seuil jours ouverts : {await get_setting('nonparticipant_threshold_open_days','3')}")
+    return '\n'.join(lines)
+async def run_admin_autotest(ctx):
+    tests=[]
+    def add(n,ok,d=''): tests.append((n,bool(ok),d))
+    try:
+        async with db_pool.acquire() as con:
+            await con.fetchval('SELECT 1'); existing={r['tablename'] for r in await con.fetch("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
+        add('Database',True)
+        for t in ['settings','sessions','messages','participants','banned_words','banned_words_hard','forbidden_usernames','media_hashes','banned_hashes','nonparticipant_seen']: add('Table '+t,t in existing)
+    except Exception as e: add('Database',False,str(e))
+    try:
+        me=await ctx.bot.get_me(); m=await ctx.bot.get_chat_member(GROUP_ID,me.id); add('Bot admin groupe',m.status in ('administrator','creator'),m.status)
+    except Exception as e: add('Bot admin groupe',False,str(e))
+    if REDIFFUSION_GROUP_ID:
+        ok,msg=await validate_rediff(ctx); add('Rediffusion',ok,msg)
+    else: add('Rediffusion',True,'non configurée')
+    add('Token snap',contains_forbidden_token('tu as son snap','snap')); add('Pas Mathias/hi',not contains_forbidden_token('Mathias','hi')); add('Admins commandes trusted',all(is_trusted_or_super(x) for x in ADMIN_IDS) if ADMIN_IDS else True)
+    okc=sum(1 for _,ok,_ in tests if ok); bad=sum(1 for _,ok,_ in tests if not ok)
+    return '\n'.join(['🧪 Auto-test','',f'🟢 OK : {okc}',f'🔴 Erreurs : {bad}','']+[f"{'✅' if ok else '❌'} {n}"+(f' — {d}' if d else '') for n,ok,d in tests])
 
 # hash
 
@@ -269,7 +377,7 @@ async def trusted_pasfr(update,ctx):
     if not await require_trusted(update,ctx): return
     msg=update.message; actor=update.effective_user; target=msg.reply_to_message
     if not target or not target.from_user: await delete_safe(ctx,GROUP_ID,msg.message_id); return
-    await delete_block(ctx,target); await delete_safe(ctx,GROUP_ID,msg.message_id); await inc_counter('session_deletions'); await log_trusted(actor.id,'pasfr',target.from_user.id,target.message_id); await warning(ctx,MSG_PASFR)
+    await delete_block(ctx,target); await delete_safe(ctx,GROUP_ID,msg.message_id); await inc_counter('session_deletions'); await log_trusted(actor.id,'pasfr',target.from_user.id,target.message_id); await warning(ctx,MSG_PASFR,30,True)
 async def trusted_ban(update,ctx):
     if not await require_trusted(update,ctx): return
     msg=update.message; actor=update.effective_user; target=msg.reply_to_message
@@ -334,7 +442,7 @@ async def send_share(update,ctx):
 async def handle_group_message(update,ctx):
     msg=update.effective_message; user=update.effective_user
     if not msg or not user: return
-    await save_message(GROUP_ID,msg.message_id,user.id,False,getattr(msg,'media_group_id',None))
+    await save_message(GROUP_ID,msg.message_id,user.id,False,getattr(msg,'media_group_id',None)); await track_open_session_presence(user)
     if is_system_or_anonymous_user(user): return
     text=msg_text(msg); protected=is_protected_user(user.id)
     if getattr(msg,'new_chat_members',None):
@@ -367,19 +475,21 @@ async def handle_group_message(update,ctx):
         if is_forwarded(msg) and not has_media(msg): await punish_ban(update,ctx,'forward texte interdit',MSG_FORWARD_FORBIDDEN); return
         if is_live_or_story(msg): await punish_ban(update,ctx,'live/story interdit',MSG_GENERIC_FORBIDDEN); return
     if not protected and has_media(msg) and '@' in (getattr(msg,'caption','') or ''):
-        await delete_safe(ctx,GROUP_ID,msg.message_id); c=await violation(user.id,'media_mention_ad'); await restrict_days(ctx,user.id,max(1,min(c,30)),'media_mention_ad'); await inc_counter('session_mutes'); await warning(ctx,MSG_PUB_ATTEMPT); return
+        await delete_safe(ctx,GROUP_ID,msg.message_id); c=await violation(user.id,'media_mention_ad'); await restrict_days(ctx,user.id,max(1,min(c,30)),'media_mention_ad'); await inc_counter('session_mutes'); await warning(ctx,MSG_PUB_ATTEMPT,30); return
     if await get_setting('participation','on')=='on' and not protected and not await has_participated(user.id):
         if not has_media(msg): await delete_safe(ctx,GROUP_ID,msg.message_id); await inc_counter('session_deletions'); print(f'PARTICIPATION REQUIRED TRIGGERED user={user.id}',flush=True); await participation_warning(ctx,user); await add_danger(user.id,1,'message avant participation'); return
     if has_media(msg) and keys:
         existing=await any_existing(keys)
-        if existing: await delete_safe(ctx,GROUP_ID,msg.message_id); await inc_counter('session_deletions'); await warning(ctx,MSG_REPOST); await add_danger(user.id,2,'repost média'); return
+        if existing: await delete_safe(ctx,GROUP_ID,msg.message_id); await inc_counter('session_deletions'); await warning(ctx,MSG_REPOST,30); await add_danger(user.id,2,'repost média'); return
     if await get_setting('participation','on')=='on' and not protected and has_media(msg) and hashable and keys and not await has_participated(user.id): await mark_participated(user,keys[0])
     if has_media(msg) and keys: await record_media(keys,user.id,GROUP_ID,msg.message_id,media_type(msg)); await rediffuse(ctx,msg)
 async def chat_member_update(update,ctx):
     cm=update.chat_member
     if not cm: return
     user=cm.new_chat_member.user
-    if cm.new_chat_member.status in ('member','restricted'): await ban_for_username(ctx,user)
+    if cm.new_chat_member.status in ('member','restricted'):
+        await track_open_session_presence(user)
+        await ban_for_username(ctx,user)
 
 # rediffusion
 async def validate_rediff(ctx):
@@ -395,9 +505,12 @@ async def rediffuse(ctx,msg):
 
 # panels (clean minimal)
 def back(): return InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Retour',callback_data='info')]])
-async def main_kb(): return InlineKeyboardMarkup([[InlineKeyboardButton('🚫 Mots interdits',callback_data='words_menu')],[InlineKeyboardButton('⛔ Mots bannis',callback_data='hard_menu')],[InlineKeyboardButton('👤 Usernames interdits',callback_data='users_menu')],[InlineKeyboardButton('📣 Publicité partage',callback_data='share_menu')],[InlineKeyboardButton('📢 Broadcast privé',callback_data='broadcast_set')],[InlineKeyboardButton('📡 Rediffusion ON/OFF',callback_data='toggle_rediff')],[InlineKeyboardButton('🔇 Sanctions visibles ON/OFF',callback_data='toggle_silent')],[InlineKeyboardButton('🏆 Classement ON/OFF',callback_data='toggle_leaderboard')]])
+async def main_kb(): return InlineKeyboardMarkup([[InlineKeyboardButton('🎭 Participation ON/OFF',callback_data='toggle_participation')],[InlineKeyboardButton('🟢 Ouvrir session',callback_data='open_session')],[InlineKeyboardButton('🔴 Fermer session',callback_data='close_session')],[InlineKeyboardButton('👢 Non-participants',callback_data='nonparticipants_prompt')],[InlineKeyboardButton('🚫 Mots interdits',callback_data='words_menu')],[InlineKeyboardButton('⛔ Mots bannis',callback_data='hard_menu')],[InlineKeyboardButton('👤 Usernames interdits',callback_data='users_menu')],[InlineKeyboardButton('📣 Publicité partage',callback_data='share_menu')],[InlineKeyboardButton('📢 Broadcast privé',callback_data='broadcast_set')],[InlineKeyboardButton('📡 Rediffusion ON/OFF',callback_data='toggle_rediff')],[InlineKeyboardButton('🔇 Sanctions visibles ON/OFF',callback_data='toggle_silent')],[InlineKeyboardButton('🏆 Classement ON/OFF',callback_data='toggle_leaderboard')],[InlineKeyboardButton('🧪 Auto-test',callback_data='autotest')],[InlineKeyboardButton('ℹ️ Info système',callback_data='system_info')]])
 async def st_kb(): return InlineKeyboardMarkup([[InlineKeyboardButton('👀 Voir mots interdits',callback_data='st_words')],[InlineKeyboardButton('➕ Ajouter mot interdit',callback_data='st_add')],[InlineKeyboardButton('📊 Stats 7 jours',callback_data='st_stats7')],[InlineKeyboardButton('📈 Historique complet',callback_data='st_statsall')]])
-async def panel_text(): return f'🛠️ Panel admin\n\nParticipation {await get_setting("participation","on")}\nMessages visibles {await get_setting("silent_sanctions","on")}\nRediffusion {await get_setting("rediffusion_enabled","off")}\nClassement {await get_setting("leaderboard_enabled","on")}\n\nVersion: {APP_VERSION}'
+async def panel_text():
+    sess = await get_open_session()
+    st = '🟢 ouverte #' + str(sess['id']) if sess else '🔴 fermée'
+    return f'🛠️ Panel admin\n\nSession {st}\nParticipation {await get_setting("participation","on")}\nMessages visibles {await get_setting("silent_sanctions","on")}\nRediffusion {await get_setting("rediffusion_enabled","off")}\nClassement {await get_setting("leaderboard_enabled","on")}\nNon-participants {await get_setting("nonparticipant_enabled","on")}\n\nVersion: {APP_VERSION}'
 async def start(update,ctx):
     u=update.effective_user
     if update.effective_chat.type=='private': await track_private(u)
@@ -418,6 +531,12 @@ async def callbacks(update,ctx):
     if data in ('st_stats7','st_statsall') and (u.id in SUPER_TRUSTED_IDS or is_admin(u.id)): await q.edit_message_text(await trusted_stats(ctx,7 if data=='st_stats7' else None),reply_markup=await st_kb()); return
     if not is_admin(u.id): return
     if data=='info': await q.edit_message_text(await panel_text(),reply_markup=await main_kb()); return
+    if data=='toggle_participation': await set_setting('participation','off' if await get_setting('participation','on')=='on' else 'on'); await q.edit_message_text(await panel_text(),reply_markup=await main_kb()); return
+    if data=='open_session': sid=await open_session_admin(ctx); await q.edit_message_text(f'🟢 Session ouverte #{sid}',reply_markup=await main_kb()); return
+    if data=='close_session': sid=await close_session_admin(ctx); await q.edit_message_text(f'🔴 Session fermée #{sid}' if sid else 'ℹ️ Aucune session ouverte.',reply_markup=await main_kb()); return
+    if data=='nonparticipants_prompt': await send_nonparticipant_prompt(ctx,u.id); await q.edit_message_text('📩 Demande envoyée en privé. Répondez avec le nombre à expulser.',reply_markup=await main_kb()); return
+    if data=='system_info': await q.edit_message_text(await build_system_info(ctx),reply_markup=await main_kb()); return
+    if data=='autotest': await q.edit_message_text(await run_admin_autotest(ctx),reply_markup=await main_kb()); return
     if data=='toggle_silent': await set_setting('silent_sanctions','off' if await get_setting('silent_sanctions','on')=='on' else 'on'); await q.edit_message_text(await panel_text(),reply_markup=await main_kb()); return
     if data=='toggle_leaderboard': await set_setting('leaderboard_enabled','off' if await get_setting('leaderboard_enabled','on')=='on' else 'on'); await q.edit_message_text(await panel_text(),reply_markup=await main_kb()); return
     if data=='toggle_rediff':
@@ -440,6 +559,10 @@ async def private_admin(update,ctx):
     u=update.effective_user; msg=update.message; await track_private(u); st=await get_state(u.id)
     if not st: return
     state=st['state']; text=(msg.text or msg.caption or '').strip()
+    if state=='nonparticipant_kick_count':
+        if not is_admin(u.id): return
+        if not text.strip().isdigit(): await set_state(u.id,None); await msg.reply_text('ℹ️ Aucune action effectuée.'); return
+        kicked=await kick_nonparticipants_public(ctx,int(text.strip())); await set_state(u.id,None); await msg.reply_text(f'✅ Expulsions non-participants terminées : {kicked}'); return
     if state=='st_add' and (u.id in SUPER_TRUSTED_IDS or is_admin(u.id)): await add_value('banned_words','word',text); await set_state(u.id,None); await msg.reply_text('✅ Ajouté.'); return
     if not is_admin(u.id): return
     maps={'words_add':('banned_words','word','add'),'hard_add':('banned_words_hard','word','add'),'users_add':('forbidden_usernames','pattern','add'),'words_del':('banned_words','word','del'),'hard_del':('banned_words_hard','word','del'),'users_del':('forbidden_usernames','pattern','del')}

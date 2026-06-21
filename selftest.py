@@ -18,3 +18,8 @@ assert pos_hash < pos_hard < pos_words < pos_links
 assert 'return uid in TRUSTED_IDS or uid in SUPER_TRUSTED_IDS or is_admin(uid)' in bot
 for s in ['MSG_GENERIC_FORBIDDEN','MSG_FAKE_COMMAND','MSG_PARTICIPATION_REQUIRED']: assert s+'=' in bot or s+' =' in bot
 print('SELFTEST OK')
+
+assert 'nonparticipant_seen' in bot
+assert 'open_session_admin' in bot
+assert 'build_system_info' in bot
+assert 'run_admin_autotest' in bot

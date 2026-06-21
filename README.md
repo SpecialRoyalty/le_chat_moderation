@@ -1,4 +1,4 @@
-# FINAL_CLEAN_V12_KICK_NOTICES_CLEANUP
+# FINAL_CLEAN_V13_NAME_FIXES_AUTO_LOGS
 
 Version propre recodée depuis le cahier des charges validé.
 
@@ -171,3 +171,15 @@ Correction kick non-participants :
 Logs :
 - `NONPARTICIPANT KICK NOTICE KEPT`
 - `NONPARTICIPANT KICK CLEANUP`
+
+## V13_NAME_FIXES_AUTO_LOGS
+
+Corrections :
+- alias `ban_for_forbidden_username` ajouté pour supprimer le NameError au join ;
+- `back_kb()` ajouté pour supprimer le NameError du bouton `🧬 Hash média` ;
+- error handler ajouté pour éviter les logs `No error handlers are registered`;
+- logs auto-horaire ajoutés :
+  - `AUTO SCHEDULE DEBUG`
+  - `AUTO OPENING REMINDER CHECK no_send`
+
+Note : dimanche, avec ouverture 22h30, il n'y a pas de rappel à 21h00. Premier rappel attendu : 21h30.

@@ -12,7 +12,7 @@ try:
 except Exception:
     cv2 = None
 
-APP_VERSION='FINAL_CLEAN_V12_KICK_NOTICES_CLEANUP'
+APP_VERSION='FINAL_CLEAN_V13_NAME_FIXES_AUTO_LOGS'
 BOT_TOKEN=os.getenv('BOT_TOKEN','').strip(); DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 GROUP_ID=int(os.getenv('GROUP_ID','0') or '0'); BOT_USERNAME=os.getenv('BOT_USERNAME','').strip().lstrip('@')
 TZ=ZoneInfo(os.getenv('TZ','Europe/Paris'))
@@ -319,7 +319,7 @@ async def open_session_admin(ctx=None):
     print(f'SESSION OPEN #{sid}',flush=True)
     if ctx:
         try:
-            await send_or_edit_session_status(ctx,sid,'🟢 Session ouverte\n\nBienvenue à tous. La participation est obligatoire pendant cette session.Envoyez vos videos ! ')
+            await send_or_edit_session_status(ctx,sid,'🟢 Session ouverte\n\nBienvenue à tous. La participation est obligatoire pendant cette session.')
         except Exception as e:
             print(f'SESSION PUBLIC OPEN STATUS ERROR #{sid}: {e}',flush=True)
         try:
@@ -347,7 +347,7 @@ async def close_session_admin(ctx=None):
         except Exception as e:
             print(f'NONPARTICIPANT CLEANUP CLOSE ERROR: {e}',flush=True)
         try:
-            await send_or_edit_session_status(ctx,sid,'🔴 Session fermée\n\nMerci à tous les participants d attendre la prochaine ouverture.')
+            await send_or_edit_session_status(ctx,sid,'🔴 Session fermée\n\nMerci à tous les participants.')
         except Exception as e:
             print(f'SESSION PUBLIC CLOSE STATUS ERROR #{sid}: {e}',flush=True)
         try:
@@ -474,6 +474,8 @@ async def handle_opening_reminders(ctx, start):
         return
     bucket = reminder_minute_bucket(delta)
     if not bucket:
+        mins=int(delta//60)
+        print(f'AUTO OPENING REMINDER CHECK no_send opening_in_min={mins}', flush=True)
         return
     typ, val = bucket
     key = f'open:{start.isoformat()}:{typ}:{val}'
@@ -526,6 +528,7 @@ async def auto_schedule_tick(ctx):
         return
     start,end=window
     now=datetime.now(TZ)
+    print(f'AUTO SCHEDULE DEBUG now={now.isoformat()} start={start.isoformat()} end={end.isoformat()} auto=on', flush=True)
     sess=await get_open_session()
 
     if now < start:
@@ -906,6 +909,25 @@ async def process_media_priority_v8(update, ctx, keys, hashable):
             return 'stop'
 
     return 'ok'
+
+
+async def ban_for_forbidden_username(ctx, user):
+    if 'ban_for_username' in globals():
+        return await ban_for_username(ctx, user)
+    if 'username_forbidden_match' in globals():
+        pat = await username_forbidden_match(user)
+        if pat:
+            try:
+                await ctx.bot.ban_chat_member(GROUP_ID, user.id)
+                print(f'USERNAME BAN MATCH user={user.id} pattern={pat}', flush=True)
+                return True
+            except Exception as e:
+                print(f'USERNAME BAN ERROR user={getattr(user,"id",None)}: {e}', flush=True)
+    return False
+
+
+def back_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Retour', callback_data='info')]])
 
 
 async def handle_group_message(update,ctx):
@@ -1357,6 +1379,13 @@ async def trusted_stats(ctx,days=None):
     async with db_pool.acquire() as con: rows=await con.fetch(f'SELECT trusted_id,COUNT(*) total FROM trusted_actions {where} GROUP BY trusted_id ORDER BY total DESC')
     return ('📊 Stats' if days else '📈 Historique')+'\n\n'+('\n'.join(f'• {r["trusted_id"]}: {r["total"]}' for r in rows) if rows else 'Aucune intervention.')
 
+async def error_handler_v13(update, ctx):
+    try:
+        print(f'ERROR HANDLED: {ctx.error}', flush=True)
+    except Exception:
+        pass
+
+
 def build_app():
     if not BOT_TOKEN: raise RuntimeError('BOT_TOKEN manquant')
     app=Application.builder().token(BOT_TOKEN).build(); app.post_init=lambda app:init_db()
@@ -1367,6 +1396,7 @@ def build_app():
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.COMMAND,handle_group_command)); app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & ~filters.COMMAND,handle_group_message))
     app.add_handler(ChatMemberHandler(chat_member_update,ChatMemberHandler.CHAT_MEMBER));
     if app.job_queue: app.job_queue.run_repeating(auto_schedule_tick,interval=60,first=20)
+    app.add_error_handler(error_handler_v13)
     return app
 
 def main(): print(f'STARTING {APP_VERSION}',flush=True); build_app().run_polling(allowed_updates=Update.ALL_TYPES)

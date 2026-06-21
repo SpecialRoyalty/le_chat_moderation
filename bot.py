@@ -12,7 +12,7 @@ try:
 except Exception:
     cv2 = None
 
-APP_VERSION='FINAL_CLEAN_V3_SESSION_PUBLIC_AUTO'
+APP_VERSION='FINAL_CLEAN_V4_SESSION_FIX'
 BOT_TOKEN=os.getenv('BOT_TOKEN','').strip(); DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 GROUP_ID=int(os.getenv('GROUP_ID','0') or '0'); BOT_USERNAME=os.getenv('BOT_USERNAME','').strip().lstrip('@')
 TZ=ZoneInfo(os.getenv('TZ','Europe/Paris'))
@@ -30,7 +30,7 @@ MSG_FORWARD_FORBIDDEN='🚫 Les transferts texte ne sont pas autorisés.'; MSG_G
 MSG_FAKE_COMMAND='🔇 Commande réservée à la modération. Si vous essayez, vous êtes sanctionné.'
 MSG_PASFR='⚠️ Merci d’envoyer uniquement du contenu FR.'; MSG_PUB_ATTEMPT='🚫 Tentative de publicité interdite.'
 
-DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','nonparticipant_enabled':'on','nonparticipant_threshold_open_days':'3','auto_schedule_enabled':'off','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':''}
+DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','nonparticipant_enabled':'on','nonparticipant_threshold_open_days':'3','auto_schedule_enabled':'off','schedule_json':'{}','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':''}
 TABLES=[
 "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)",
 "CREATE TABLE IF NOT EXISTS admin_states(user_id BIGINT PRIMARY KEY,state TEXT,payload TEXT,updated_at TIMESTAMP DEFAULT NOW())",
@@ -93,6 +93,9 @@ async def init_db():
     db_pool=await asyncpg.create_pool(DATABASE_URL,min_size=1,max_size=5)
     async with db_pool.acquire() as con:
         for q in TABLES: await con.execute(q)
+        await con.execute('ALTER TABLE IF EXISTS messages ADD COLUMN IF NOT EXISTS session_id INTEGER')
+        await con.execute('ALTER TABLE IF EXISTS sessions ADD COLUMN IF NOT EXISTS status_message_id BIGINT')
+        await con.execute('ALTER TABLE IF EXISTS sessions ADD COLUMN IF NOT EXISTS status_chat_id BIGINT')
         await con.execute("ALTER TABLE IF EXISTS user_violations ADD COLUMN IF NOT EXISTS violation_type TEXT DEFAULT 'general'")
         await con.execute("ALTER TABLE IF EXISTS user_violations ADD COLUMN IF NOT EXISTS count INTEGER DEFAULT 0")
         await con.execute("ALTER TABLE IF EXISTS user_violations ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()")
@@ -115,7 +118,15 @@ async def set_state(uid,state,payload=None):
 async def get_state(uid):
     async with db_pool.acquire() as con: return await con.fetchrow('SELECT state,payload FROM admin_states WHERE user_id=$1',uid)
 async def save_message(chat_id,msg_id,uid,is_system=False,media_group_id=None):
-    async with db_pool.acquire() as con: await con.execute('INSERT INTO messages(chat_id,message_id,user_id,media_group_id,is_system,created_at) VALUES($1,$2,$3,$4,$5,NOW()) ON CONFLICT(chat_id,message_id) DO NOTHING',chat_id,msg_id,uid,media_group_id,is_system)
+    sid=None
+    try:
+        sess=await get_open_session()
+        sid=int(sess['id']) if sess else None
+    except Exception:
+        sid=None
+    async with db_pool.acquire() as con:
+        await con.execute('INSERT INTO messages(chat_id,message_id,user_id,media_group_id,is_system,created_at,session_id) VALUES($1,$2,$3,$4,$5,NOW(),$6) ON CONFLICT(chat_id,message_id) DO UPDATE SET session_id=COALESCE(messages.session_id,$6)',chat_id,msg_id,uid,media_group_id,is_system,sid)
+
 async def current_session():
     async with db_pool.acquire() as con:
         sid=await con.fetchval('SELECT id FROM sessions WHERE is_open=TRUE ORDER BY id DESC LIMIT 1')
@@ -192,6 +203,42 @@ async def fake_command(update,ctx):
 async def get_open_session():
     async with db_pool.acquire() as con:
         return await con.fetchrow('SELECT * FROM sessions WHERE is_open=TRUE ORDER BY id DESC LIMIT 1')
+async def send_or_edit_session_status(ctx, sid:int, text:str):
+    async with db_pool.acquire() as con:
+        row=await con.fetchrow('SELECT status_message_id,status_chat_id FROM sessions WHERE id=$1',sid)
+    mid=row['status_message_id'] if row else None
+    chat_id=row['status_chat_id'] if row and row['status_chat_id'] else GROUP_ID
+    if mid:
+        try:
+            await ctx.bot.edit_message_text(chat_id=chat_id,message_id=mid,text=text)
+            print(f'SESSION STATUS EDIT sid={sid} msg={mid}',flush=True)
+            return mid
+        except Exception as e:
+            print(f'SESSION STATUS EDIT ERROR sid={sid} msg={mid}: {e}',flush=True)
+    msg=await ctx.bot.send_message(GROUP_ID,text)
+    await save_message(GROUP_ID,msg.message_id,None,True)
+    async with db_pool.acquire() as con:
+        await con.execute('UPDATE sessions SET status_message_id=$2,status_chat_id=$3 WHERE id=$1',sid,msg.message_id,GROUP_ID)
+    print(f'SESSION STATUS SEND sid={sid} msg={msg.message_id}',flush=True)
+    return msg.message_id
+
+
+async def purge_session_messages(ctx,sid:int):
+    async with db_pool.acquire() as con:
+        status_mid=await con.fetchval('SELECT status_message_id FROM sessions WHERE id=$1',sid)
+        rows=await con.fetch('SELECT chat_id,message_id,is_system FROM messages WHERE session_id=$1 ORDER BY created_at ASC',sid)
+    total=0
+    print(f'SESSION DELETE START sid={sid} candidates={len(rows)}',flush=True)
+    for r in rows:
+        if status_mid and int(r['message_id'])==int(status_mid):
+            continue
+        await delete_safe(ctx,r['chat_id'],r['message_id'])
+        total+=1
+        await asyncio.sleep(0.015)
+    print(f'SESSION DELETE END sid={sid} total={total}',flush=True)
+    return total
+
+
 async def open_session_admin(ctx=None):
     async with db_pool.acquire() as con:
         row=await con.fetchrow('SELECT id FROM sessions WHERE is_open=TRUE ORDER BY id DESC LIMIT 1')
@@ -202,13 +249,11 @@ async def open_session_admin(ctx=None):
     print(f'SESSION OPEN #{sid}',flush=True)
     if ctx:
         try:
-            public=await ctx.bot.send_message(GROUP_ID,'🟢 Session ouverte\n\nLa participation est obligatoire.')
-            await save_message(GROUP_ID,public.message_id,None,True)
-            print(f'SESSION PUBLIC OPEN MESSAGE #{sid} msg={public.message_id}',flush=True)
+            await send_or_edit_session_status(ctx,sid,'🟢 Session ouverte\n\nBienvenue à tous. La participation est obligatoire pendant cette session.')
         except Exception as e:
-            print(f'SESSION PUBLIC OPEN MESSAGE ERROR #{sid}: {e}',flush=True)
+            print(f'SESSION PUBLIC OPEN STATUS ERROR #{sid}: {e}',flush=True)
         try:
-            await send_super_trusted_report(ctx, f'🟢 Session ouverte #{sid}')
+            await send_super_trusted_report(ctx,f'🟢 Session ouverte #{sid}')
         except Exception as e:
             print(f'SUPER TRUSTED OPEN REPORT ERROR: {e}',flush=True)
     return int(sid)
@@ -219,23 +264,27 @@ async def close_session_admin(ctx=None):
         if not row:
             return None
         sid=int(row['id'])
-        await con.execute('UPDATE sessions SET is_open=FALSE,closed_at=NOW() WHERE id=$1',sid)
     print(f'SESSION CLOSE #{sid}',flush=True)
+    deleted=0
     if ctx:
+        try:
+            deleted=await purge_session_messages(ctx,sid)
+        except Exception as e:
+            print(f'SESSION PURGE ERROR #{sid}: {e}',flush=True)
         try:
             await cleanup_nonparticipant_kick_messages(ctx,sid)
         except Exception as e:
             print(f'NONPARTICIPANT CLEANUP CLOSE ERROR: {e}',flush=True)
         try:
-            public=await ctx.bot.send_message(GROUP_ID,'🔴 Session fermée\n\nMerci à tous les participants.')
-            await save_message(GROUP_ID,public.message_id,None,True)
-            print(f'SESSION PUBLIC CLOSE MESSAGE #{sid} msg={public.message_id}',flush=True)
+            await send_or_edit_session_status(ctx,sid,f'🔴 Session fermée\n\nMerci à tous les participants.\nMessages supprimés : {deleted}')
         except Exception as e:
-            print(f'SESSION PUBLIC CLOSE MESSAGE ERROR #{sid}: {e}',flush=True)
+            print(f'SESSION PUBLIC CLOSE STATUS ERROR #{sid}: {e}',flush=True)
         try:
-            await send_super_trusted_report(ctx, f'🔴 Session fermée #{sid}')
+            await send_super_trusted_report(ctx,f'🔴 Session fermée #{sid}')
         except Exception as e:
             print(f'SUPER TRUSTED CLOSE REPORT ERROR: {e}',flush=True)
+    async with db_pool.acquire() as con:
+        await con.execute('UPDATE sessions SET is_open=FALSE,closed_at=NOW() WHERE id=$1',sid)
     return sid
 
 async def track_open_session_presence(user):
@@ -254,6 +303,76 @@ async def count_nonparticipant_seen():
     async with db_pool.acquire() as con: return int(await con.fetchval('SELECT COUNT(DISTINCT user_id) FROM nonparticipant_seen') or 0)
 async def auto_schedule_status_text():
     return '🟢 ON' if await get_setting('auto_schedule_enabled','off')=='on' else '🔴 OFF'
+
+
+def parse_hhmm(value):
+    h,m=value.split(':')
+    return int(h),int(m)
+
+
+def dt_for_day_and_hhmm(base,hhmm):
+    h,m=parse_hhmm(hhmm)
+    return base.replace(hour=h,minute=m,second=0,microsecond=0)
+
+
+async def get_today_schedule_window():
+    raw=await get_setting('schedule_json','{}')
+    try:
+        data=json.loads(raw or '{}')
+    except Exception:
+        data={}
+    now=datetime.now(TZ)
+    candidates=[]
+    for offset in (-1,0):
+        day=now.date()+timedelta(days=offset)
+        wd=str(day.weekday())
+        for pair in data.get(wd,[]):
+            if not isinstance(pair,list) or len(pair)!=2:
+                continue
+            start=dt_for_day_and_hhmm(datetime.combine(day,datetime.min.time(),tzinfo=TZ),pair[0])
+            end=dt_for_day_and_hhmm(datetime.combine(day,datetime.min.time(),tzinfo=TZ),pair[1])
+            if end<=start:
+                end+=timedelta(days=1)
+            candidates.append((start,end))
+    for start,end in candidates:
+        if start<=now<=end:
+            return start,end
+    future=[]
+    for add in range(0,8):
+        day=now.date()+timedelta(days=add)
+        wd=str(day.weekday())
+        for pair in data.get(wd,[]):
+            start=dt_for_day_and_hhmm(datetime.combine(day,datetime.min.time(),tzinfo=TZ),pair[0])
+            end=dt_for_day_and_hhmm(datetime.combine(day,datetime.min.time(),tzinfo=TZ),pair[1])
+            if end<=start:
+                end+=timedelta(days=1)
+            if start>=now:
+                future.append((start,end))
+    if future:
+        return min(future,key=lambda x:x[0])
+    return None
+
+
+async def auto_schedule_tick(ctx):
+    if await get_setting('auto_schedule_enabled','off')!='on':
+        return
+    window=await get_today_schedule_window()
+    if not window:
+        print('AUTO SCHEDULE TICK: ON but no schedule_json configured',flush=True)
+        return
+    start,end=window
+    now=datetime.now(TZ)
+    sess=await get_open_session()
+    if start<=now<=end and not sess:
+        print(f'AUTO SCHEDULE OPEN start={start} end={end}',flush=True)
+        await open_session_admin(ctx)
+    elif now>end and sess:
+        print(f'AUTO SCHEDULE CLOSE end={end}',flush=True)
+        await close_session_admin(ctx)
+    elif now<start:
+        mins=int((start-now).total_seconds()//60)
+        print(f'AUTO SCHEDULE COUNTDOWN opening_in_min={mins}',flush=True)
+
 
 async def auto_schedule_tick(ctx):
     if await get_setting('auto_schedule_enabled','off')!='on':
@@ -292,24 +411,40 @@ async def build_system_info(ctx):
     lines=['ℹ️ Info système','',f'Version : {APP_VERSION}']
     try:
         async with db_pool.acquire() as con:
-            await con.fetchval('SELECT 1'); tables=await con.fetch("SELECT tablename FROM pg_tables WHERE schemaname='public'")
+            await con.fetchval('SELECT 1')
+            tables=await con.fetch("SELECT tablename FROM pg_tables WHERE schemaname='public'")
             lines+=['Database : ✅ OK',f'Tables : {len(tables)}']
             for t in ['banned_words','banned_words_hard','forbidden_usernames','banned_hashes','media_hashes','participants','private_users','nonparticipant_seen']:
-                try: c=int(await con.fetchval(f'SELECT COUNT(*) FROM {t}') or 0)
-                except Exception: c=-1
+                try:
+                    c=int(await con.fetchval(f'SELECT COUNT(*) FROM {t}') or 0)
+                except Exception:
+                    c=-1
                 lines.append(f'{t} : {c}')
-    except Exception as e: lines.append(f'Database : ❌ ERROR {e}')
+    except Exception as e:
+        lines.append(f'Database : ❌ ERROR {e}')
     try:
-        me=await ctx.bot.get_me(); m=await ctx.bot.get_chat_member(GROUP_ID,me.id); lines.append(f'Groupe principal : ✅ {m.status}')
-    except Exception as e: lines.append(f'Groupe principal : ❌ {e}')
+        me=await ctx.bot.get_me()
+        m=await ctx.bot.get_chat_member(GROUP_ID,me.id)
+        lines.append(f'Groupe principal : ✅ {m.status}')
+    except Exception as e:
+        lines.append(f'Groupe principal : ❌ {e}')
     if REDIFFUSION_GROUP_ID:
-        ok,msg=await validate_rediff(ctx); lines.append(f"Rediffusion : {'✅' if ok else '❌'} {msg}")
-    else: lines.append('Rediffusion : ⚪ non configurée')
-    sess=await get_open_session(); lines.append(f"Session : {'🟢 ouverte #'+str(sess['id']) if sess else '🔴 fermée'}")
-    lines.append(f'Non-participants suivis : {await count_nonparticipant_seen()}')
-    lines.append(f'Éligibles expulsion : {len(await eligible_nonparticipants())}')
-    lines.append(f"Seuil jours ouverts : {await get_setting('nonparticipant_threshold_open_days','3')}")
+        ok,msg=await validate_rediff(ctx)
+        lines.append(f"Rediffusion : {'✅' if ok else '❌'} {msg}")
+    else:
+        lines.append('Rediffusion : ⚪ non configurée')
+    sess=await get_open_session()
+    st='🟢 ouverte #'+str(sess['id']) if sess else '🔴 fermée'
+    lines.append(f'Session : {st}')
+    lines.append(f'Ouverture auto : {await auto_schedule_status_text()}')
+    lines.append(f'Horaires JSON : {await get_setting("schedule_json","{}")}')
+    try:
+        lines.append(f'Non-participants suivis : {await count_nonparticipant_seen()}')
+        lines.append(f'Éligibles expulsion : {len(await eligible_nonparticipants())}')
+    except Exception as e:
+        lines.append(f'Non-participants : ❌ {e}')
     return '\n'.join(lines)
+
 async def run_admin_autotest(ctx):
     tests=[]
     def add(n,ok,d=''): tests.append((n,bool(ok),d))
@@ -549,10 +684,10 @@ async def main_kb():
         [InlineKeyboardButton('⏰ Ouverture auto ON/OFF',callback_data='toggle_auto_schedule')],
         [InlineKeyboardButton('👢 Non-participants',callback_data='nonparticipants_prompt')],
         [InlineKeyboardButton('🚫 Mots interdits',callback_data='words_menu')],
-        [InlineKeyboardButton('⛔ Mots bannis',callback_data='hard_words_menu')],
-        [InlineKeyboardButton('👤 Usernames interdits',callback_data='usernames_menu')],
-        [InlineKeyboardButton('📣 Publicité partage',callback_data='share_pub_menu')],
-        [InlineKeyboardButton('📢 Broadcast privé',callback_data='broadcast_private_set')],
+        [InlineKeyboardButton('⛔ Mots bannis',callback_data='hard_menu')],
+        [InlineKeyboardButton('👤 Usernames interdits',callback_data='users_menu')],
+        [InlineKeyboardButton('📣 Publicité partage',callback_data='share_menu')],
+        [InlineKeyboardButton('📢 Broadcast privé',callback_data='broadcast_set')],
         [InlineKeyboardButton('📡 Rediffusion ON/OFF',callback_data='toggle_rediffusion')],
         [InlineKeyboardButton('🔇 Sanctions visibles ON/OFF',callback_data='toggle_silent')],
         [InlineKeyboardButton('🏆 Classement ON/OFF',callback_data='toggle_leaderboard')],

@@ -1,4 +1,4 @@
-# FINAL_CLEAN_V3_SESSION_PUBLIC_AUTO
+# FINAL_CLEAN_V4_SESSION_FIX
 
 Version propre recodée depuis le cahier des charges validé.
 
@@ -75,3 +75,12 @@ Sessions, info système, auto-test, non-participants, messages 30s.
 - bouton ouverture auto ON/OFF remis ;
 - état auto visible dans panel/info ;
 - job auto présent sans horaires configurés.
+
+## V4_SESSION_FIX
+
+Corrections :
+- un seul message de session : ouverture envoie/édite, fermeture édite le même message ;
+- fermeture purge les messages de la session (`SESSION DELETE START/END`) ;
+- callbacks du panel réalignés : mots bannis, usernames, pub partage, broadcast ;
+- ouverture auto utilise `schedule_json` si configuré.
+- Format `schedule_json` : `{"5":[["23:00","01:00"]],"6":[["22:30","00:15"]]}`

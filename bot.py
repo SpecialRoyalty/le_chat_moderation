@@ -12,7 +12,7 @@ try:
 except Exception:
     cv2 = None
 
-APP_VERSION='FINAL_CLEAN_V9_RULES_GROUP_BROADCAST'
+APP_VERSION='FINAL_CLEAN_V11_RESTRICT_VISIBILITY'
 BOT_TOKEN=os.getenv('BOT_TOKEN','').strip(); DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 GROUP_ID=int(os.getenv('GROUP_ID','0') or '0'); BOT_USERNAME=os.getenv('BOT_USERNAME','').strip().lstrip('@')
 TZ=ZoneInfo(os.getenv('TZ','Europe/Paris'))
@@ -180,10 +180,47 @@ async def alert_ban(ctx,user,reason,detected=None):
     det=f'\nÉlément détecté : {detected}' if detected else ''
     await notify_admins(ctx,f'🚨 Ban automatique\n\nMotif : {reason}\nUtilisateur : {display(user)}{det}\nAction : ban direct')
 
-async def restrict_days(ctx,uid,days,reason):
-    until=datetime.now(TZ)+timedelta(days=days)
-    await ctx.bot.restrict_chat_member(GROUP_ID,uid,ChatPermissions(can_send_messages=False),until_date=until)
-    async with db_pool.acquire() as con: await con.execute('INSERT INTO restricted_users(user_id,reason,restricted_until,created_at,updated_at) VALUES($1,$2,$3,NOW(),NOW()) ON CONFLICT(user_id) DO UPDATE SET reason=$2,restricted_until=$3,updated_at=NOW()',uid,reason,until.replace(tzinfo=None))
+async def unban_later(ctx, user_id:int, seconds:int):
+    await asyncio.sleep(max(1, seconds))
+    try:
+        await ctx.bot.unban_chat_member(GROUP_ID, user_id, only_if_banned=True)
+        print(f'RESTRICTION VISIBILITY RESTORE user={user_id}', flush=True)
+    except Exception as e:
+        print(f'RESTRICTION VISIBILITY RESTORE ERROR user={user_id}: {e}', flush=True)
+
+
+async def restrict_days(ctx, uid, days, reason):
+    until = datetime.now(TZ) + timedelta(days=days)
+
+    try:
+        await ctx.bot.restrict_chat_member(
+            GROUP_ID,
+            uid,
+            ChatPermissions(can_send_messages=False),
+            until_date=until
+        )
+    except Exception as e:
+        print(f'RESTRICT ERROR user={uid}: {e}', flush=True)
+
+    try:
+        await ctx.bot.ban_chat_member(GROUP_ID, uid, until_date=until)
+        seconds = int((until - datetime.now(TZ)).total_seconds())
+        ctx.application.create_task(unban_later(ctx, uid, seconds))
+        print(f'RESTRICTION VISIBILITY BAN user={uid} days={days} reason={reason}', flush=True)
+    except Exception as e:
+        print(f'RESTRICTION VISIBILITY BAN ERROR user={uid}: {e}', flush=True)
+
+    try:
+        async with db_pool.acquire() as con:
+            await con.execute("""
+                INSERT INTO restricted_users(user_id,reason,restricted_until,created_at,updated_at)
+                VALUES($1,$2,$3,NOW(),NOW())
+                ON CONFLICT(user_id) DO UPDATE SET reason=$2,restricted_until=$3,updated_at=NOW()
+            """, uid, reason, until.replace(tzinfo=None))
+    except Exception as e:
+        print(f'RESTRICT DB ERROR user={uid}: {e}', flush=True)
+
+
 async def purge_user(ctx,uid):
     async with db_pool.acquire() as con: rows=await con.fetch('SELECT chat_id,message_id FROM messages WHERE user_id=$1 AND is_system=FALSE ORDER BY created_at DESC LIMIT 500',uid)
     c=0
@@ -770,34 +807,39 @@ async def closed_session_block(update, ctx) -> bool:
         return False
 
     if user and not is_system_or_anonymous_user(user) and not is_protected_user(user.id):
-        txt = msg_text(msg)
+        txt = raw_message_text(msg)
 
         if has_media(msg):
             try:
                 keys, hashable = await media_keys(ctx, msg)
                 if await process_media_priority_v8(update, ctx, keys, hashable) == 'stop':
                     return True
-                # Fermé: on piège et on stocke les hash non-bannis/non-repost, puis on supprime le message.
                 if keys:
-                    await record_media(keys,user.id,GROUP_ID,msg.message_id,media_type(msg))
+                    await record_media(keys, user.id, GROUP_ID, msg.message_id, media_type(msg))
             except Exception as e:
                 print(f'CLOSED SESSION HASH CHECK ERROR user={user.id}: {e}', flush=True)
+
+        if has_link_v10(msg):
+            print(f'CLOSED SESSION LINK BAN user={user.id} text={raw_message_text(msg)[:80]}', flush=True)
+            await punish_ban(update, ctx, 'lien interdit session fermée', MSG_LINK_FORBIDDEN)
+            return True
 
         if txt:
             try:
                 async with db_pool.acquire() as con:
-                    hard=await con.fetch('SELECT word FROM banned_words_hard')
+                    hard = await con.fetch('SELECT word FROM banned_words_hard')
                 for r in hard:
-                    w=(r['word'] or '').strip().lower()
-                    if w and contains_forbidden_token(txt,w):
+                    w = (r['word'] or '').strip().lower()
+                    if w and contains_forbidden_token(txt, w):
                         print(f'CLOSED SESSION WORD BAN user={user.id} word={w}', flush=True)
                         await punish_ban(update, ctx, 'mot banni', MSG_GENERIC_FORBIDDEN)
                         return True
+
                 async with db_pool.acquire() as con:
-                    words=await con.fetch('SELECT word FROM banned_words')
+                    words = await con.fetch('SELECT word FROM banned_words')
                 for r in words:
-                    w=(r['word'] or '').strip().lower()
-                    if w and contains_forbidden_token(txt,w):
+                    w = (r['word'] or '').strip().lower()
+                    if w and contains_forbidden_token(txt, w):
                         print(f'CLOSED SESSION WORD FORBIDDEN user={user.id} word={w}', flush=True)
                         await punish_word(update, ctx, w)
                         return True
@@ -809,27 +851,41 @@ async def closed_session_block(update, ctx) -> bool:
         print(f'CLOSED SESSION DELETE user={user.id} msg={msg.message_id}', flush=True)
     return True
 
+
+def raw_message_text(msg) -> str:
+    return (getattr(msg,'text',None) or getattr(msg,'caption',None) or '').strip()
+
+
+def has_link_v10(msg) -> bool:
+    txt = raw_message_text(msg)
+    if re.search(r'(https?://|t\.me/|telegram\.me/|www\.|\.com\b|\.net\b|\.org\b|\.fr\b)', txt, re.I):
+        return True
+    ents = (getattr(msg,'entities',None) or []) + (getattr(msg,'caption_entities',None) or [])
+    for ent in ents:
+        if getattr(ent,'type',None) in ('url','text_link'):
+            return True
+    return False
+
+
 async def process_media_priority_v8(update, ctx, keys, hashable):
     msg = update.effective_message
     user = update.effective_user
     if not msg or not user or not keys:
         return 'ok'
 
-    # V8: priorité absolue au hash banni.
     banned = await any_banned(keys)
     if banned:
-        print(f'V8 HASH PRIORITY: BANNED_HASH FIRST user={user.id} hash={banned}', flush=True)
+        print(f'V10 HASH PRIORITY: BANNED_HASH FIRST user={user.id} hash={banned}', flush=True)
         if is_protected_user(user.id):
             await delete_safe(ctx, GROUP_ID, msg.message_id)
             return 'stop'
-        await punish_ban(update, ctx, 'média interdit', MSG_GENERIC_FORBIDDEN)
+        await punish_ban(update, ctx, 'média hash interdit', MSG_GENERIC_FORBIDDEN)
         return 'stop'
 
-    # Anti-repost seulement après avoir vérifié banned_hashes.
     if await get_setting('anti_repost_enabled','on') == 'on':
         existing = await any_existing(keys)
         if existing:
-            print(f'V8 HASH PRIORITY: ANTI_REPOST AFTER_BANNED_CLEAR user={user.id} hash={existing}', flush=True)
+            print(f'V10 HASH PRIORITY: ANTI_REPOST AFTER_BANNED_CLEAR user={user.id} hash={existing}', flush=True)
             await delete_safe(ctx, GROUP_ID, msg.message_id)
             await inc_counter('session_deletions')
             await warning(ctx, f'{plain_name(user)}, ce média a déjà été publié. Ce soir pas de recyclage, sors tes médias du placard !', 30)
@@ -901,7 +957,8 @@ async def handle_group_message(update,ctx):
                 return
 
     if not protected:
-        if has_external_link(msg):
+        if has_link_v10(msg):
+            print(f'LINK BAN MATCH user={user.id} text={raw_message_text(msg)[:80]}', flush=True)
             await punish_ban(update,ctx,'lien interdit',MSG_LINK_FORBIDDEN)
             return
         if is_forwarded(msg) and not has_media(msg):
@@ -997,6 +1054,7 @@ async def main_kb():
         [InlineKeyboardButton('📢 Broadcast privé',callback_data='broadcast_set')],
         [InlineKeyboardButton('📣 Broadcast groupe',callback_data='group_broadcast_set')],
         [InlineKeyboardButton('📜 Règles',callback_data='rules_menu')],
+        [InlineKeyboardButton('🧬 Hash média',callback_data='hash_media_set')],
         [InlineKeyboardButton(red,callback_data='toggle_rediffusion')],
         [InlineKeyboardButton(vis,callback_data='toggle_silent')],
         [InlineKeyboardButton(lb,callback_data='toggle_leaderboard')],
@@ -1022,6 +1080,24 @@ async def start(update,ctx):
 async def list_values(table,col):
     async with db_pool.acquire() as con: rows=await con.fetch(f'SELECT {col} v FROM {table} ORDER BY {col}')
     return '📋 Liste\n\n'+('\n'.join('• '+r['v'] for r in rows) if rows else 'Vide.')
+async def add_banned_hashes_from_message_v10(ctx, msg, actor_id:int):
+    if not has_media(msg):
+        return 0, 'Aucun média détecté.'
+    try:
+        keys, hashable = await media_keys(ctx, msg)
+    except Exception as e:
+        return 0, f'Erreur calcul hash: {e}'
+    if not keys:
+        return 0, 'Hash impossible.'
+    async with db_pool.acquire() as con:
+        count = 0
+        for h in keys:
+            await con.execute('INSERT INTO banned_hashes(hash,created_at,added_by) VALUES($1,NOW(),$2) ON CONFLICT(hash) DO NOTHING', h, actor_id)
+            count += 1
+    print(f'MANUAL HASH BAN ADDED actor={actor_id} count={count} keys={keys}', flush=True)
+    return count, 'OK'
+
+
 async def send_configured_rule(ctx, rule_no:int):
     text = await get_setting(f'rule{rule_no}_text','')
     photo = await get_setting(f'rule{rule_no}_photo_file_id','')
@@ -1166,6 +1242,11 @@ async def callbacks(update,ctx):
     if data.endswith('_add') or data.endswith('_del'): await set_state(u.id,data); await q.edit_message_text('Envoie la valeur.',reply_markup=back()); return
     if data.endswith('_list'):
         table,col={'words_list':('banned_words','word'),'hard_list':('banned_words_hard','word'),'users_list':('forbidden_usernames','pattern')}[data]; await q.edit_message_text(await list_values(table,col),reply_markup=await main_kb()); return
+    if data=='hash_media_set':
+        await set_state(q.from_user.id,'hash_media_wait')
+        await q.edit_message_text('🧬 Envoie maintenant le média à ajouter aux hash bannis.\n\nEnsuite, toute personne qui publie ce média sera bannie.',reply_markup=back_kb())
+        return
+
     if data=='group_broadcast_set':
         await set_state(q.from_user.id,'group_broadcast')
         await q.edit_message_text('📣 Envoie le message à publier dans le groupe. Tu peux envoyer texte ou photo avec légende.',reply_markup=back_kb())

@@ -1,4 +1,4 @@
-# FINAL_CLEAN_V9_RULES_GROUP_BROADCAST
+# FINAL_CLEAN_V11_RESTRICT_VISIBILITY
 
 Version propre recodée depuis le cahier des charges validé.
 
@@ -140,3 +140,23 @@ Ajouté :
   - aperçu
 - En ouverture AUTO, chaque règle configurée est publiée une fois à un moment aléatoire de la session.
 - Les messages de règles sont supprimés à la fermeture.
+
+## V10_RULES_LINK_HASH_FIX
+
+Corrections :
+- lien détecté => ban direct (`LINK BAN MATCH`), pas restriction.
+- session fermée : lien => ban direct aussi.
+- hash banni => ban direct avant anti-repost (`V10 HASH PRIORITY: BANNED_HASH FIRST`).
+- bouton `🧬 Hash média` dans le panel admin :
+  - admin envoie un média en privé au bot ;
+  - ses hash sont ajoutés à `banned_hashes` ;
+  - si quelqu'un publie ce média ensuite => ban.
+- commande bonus admin `/hashmedia` en réponse à un média dans le groupe.
+
+## V11_RESTRICT_VISIBILITY
+
+Corrections :
+- suppression de la commande admin `/hashmedia`;
+- le bouton `🧬 Hash média` reste disponible dans le panel admin;
+- restriction = mute + retrait d'accès temporaire jusqu'à fin de restriction;
+- admins / super trusted / trusted restent protégés des sanctions auto.

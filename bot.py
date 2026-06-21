@@ -12,7 +12,7 @@ try:
 except Exception:
     cv2 = None
 
-APP_VERSION='FINAL_CLEAN_V2_SESSIONS_NONPARTICIPANTS'
+APP_VERSION='FINAL_CLEAN_V3_SESSION_PUBLIC_AUTO'
 BOT_TOKEN=os.getenv('BOT_TOKEN','').strip(); DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 GROUP_ID=int(os.getenv('GROUP_ID','0') or '0'); BOT_USERNAME=os.getenv('BOT_USERNAME','').strip().lstrip('@')
 TZ=ZoneInfo(os.getenv('TZ','Europe/Paris'))
@@ -30,7 +30,7 @@ MSG_FORWARD_FORBIDDEN='🚫 Les transferts texte ne sont pas autorisés.'; MSG_G
 MSG_FAKE_COMMAND='🔇 Commande réservée à la modération. Si vous essayez, vous êtes sanctionné.'
 MSG_PASFR='⚠️ Merci d’envoyer uniquement du contenu FR.'; MSG_PUB_ATTEMPT='🚫 Tentative de publicité interdite.'
 
-DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','nonparticipant_enabled':'on','nonparticipant_threshold_open_days':'3','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':''}
+DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','nonparticipant_enabled':'on','nonparticipant_threshold_open_days':'3','auto_schedule_enabled':'off','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':''}
 TABLES=[
 "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)",
 "CREATE TABLE IF NOT EXISTS admin_states(user_id BIGINT PRIMARY KEY,state TEXT,payload TEXT,updated_at TIMESTAMP DEFAULT NOW())",
@@ -195,21 +195,49 @@ async def get_open_session():
 async def open_session_admin(ctx=None):
     async with db_pool.acquire() as con:
         row=await con.fetchrow('SELECT id FROM sessions WHERE is_open=TRUE ORDER BY id DESC LIMIT 1')
-        if row: return int(row['id'])
-        sid=await con.fetchval('INSERT INTO sessions(opened_at,is_open,session_deletions,session_exclusions,session_mutes) VALUES(NOW(),TRUE,0,0,0) RETURNING id')
+        if row:
+            sid=int(row['id'])
+        else:
+            sid=int(await con.fetchval('INSERT INTO sessions(opened_at,is_open,session_deletions,session_exclusions,session_mutes) VALUES(NOW(),TRUE,0,0,0) RETURNING id'))
     print(f'SESSION OPEN #{sid}',flush=True)
-    if ctx: await send_super_trusted_report(ctx, f'🟢 Session ouverte #{sid}')
+    if ctx:
+        try:
+            public=await ctx.bot.send_message(GROUP_ID,'🟢 Session ouverte\n\nLa participation est obligatoire.')
+            await save_message(GROUP_ID,public.message_id,None,True)
+            print(f'SESSION PUBLIC OPEN MESSAGE #{sid} msg={public.message_id}',flush=True)
+        except Exception as e:
+            print(f'SESSION PUBLIC OPEN MESSAGE ERROR #{sid}: {e}',flush=True)
+        try:
+            await send_super_trusted_report(ctx, f'🟢 Session ouverte #{sid}')
+        except Exception as e:
+            print(f'SUPER TRUSTED OPEN REPORT ERROR: {e}',flush=True)
     return int(sid)
+
 async def close_session_admin(ctx=None):
     async with db_pool.acquire() as con:
         row=await con.fetchrow('SELECT id FROM sessions WHERE is_open=TRUE ORDER BY id DESC LIMIT 1')
-        if not row: return None
-        sid=int(row['id']); await con.execute('UPDATE sessions SET is_open=FALSE,closed_at=NOW() WHERE id=$1',sid)
+        if not row:
+            return None
+        sid=int(row['id'])
+        await con.execute('UPDATE sessions SET is_open=FALSE,closed_at=NOW() WHERE id=$1',sid)
     print(f'SESSION CLOSE #{sid}',flush=True)
     if ctx:
-        await cleanup_nonparticipant_kick_messages(ctx,sid)
-        await send_super_trusted_report(ctx, f'🔴 Session fermée #{sid}')
+        try:
+            await cleanup_nonparticipant_kick_messages(ctx,sid)
+        except Exception as e:
+            print(f'NONPARTICIPANT CLEANUP CLOSE ERROR: {e}',flush=True)
+        try:
+            public=await ctx.bot.send_message(GROUP_ID,'🔴 Session fermée\n\nMerci à tous les participants.')
+            await save_message(GROUP_ID,public.message_id,None,True)
+            print(f'SESSION PUBLIC CLOSE MESSAGE #{sid} msg={public.message_id}',flush=True)
+        except Exception as e:
+            print(f'SESSION PUBLIC CLOSE MESSAGE ERROR #{sid}: {e}',flush=True)
+        try:
+            await send_super_trusted_report(ctx, f'🔴 Session fermée #{sid}')
+        except Exception as e:
+            print(f'SUPER TRUSTED CLOSE REPORT ERROR: {e}',flush=True)
     return sid
+
 async def track_open_session_presence(user):
     if not user or is_system_or_anonymous_user(user) or is_protected_user(user.id): return
     sess=await get_open_session()
@@ -224,6 +252,14 @@ async def eligible_nonparticipants(limit=None):
     print(f'NON_PARTICIPANT_SCAN threshold={th} eligible={len(rows)}',flush=True); return rows
 async def count_nonparticipant_seen():
     async with db_pool.acquire() as con: return int(await con.fetchval('SELECT COUNT(DISTINCT user_id) FROM nonparticipant_seen') or 0)
+async def auto_schedule_status_text():
+    return '🟢 ON' if await get_setting('auto_schedule_enabled','off')=='on' else '🔴 OFF'
+
+async def auto_schedule_tick(ctx):
+    if await get_setting('auto_schedule_enabled','off')!='on':
+        return
+    print('AUTO SCHEDULE TICK: ON but schedule hours not configured yet',flush=True)
+
 async def send_nonparticipant_prompt(ctx,admin_id):
     rows=await eligible_nonparticipants(); await set_state(admin_id,'nonparticipant_kick_count')
     await ctx.bot.send_message(admin_id,f'📊 Non-participants détectés\n\n{len(rows)} comptes éligibles.\n\nCombien souhaitez-vous expulser ?\nRépondez par un chiffre. Si vous ne répondez rien, aucune action.')
@@ -505,12 +541,32 @@ async def rediffuse(ctx,msg):
 
 # panels (clean minimal)
 def back(): return InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Retour',callback_data='info')]])
-async def main_kb(): return InlineKeyboardMarkup([[InlineKeyboardButton('🎭 Participation ON/OFF',callback_data='toggle_participation')],[InlineKeyboardButton('🟢 Ouvrir session',callback_data='open_session')],[InlineKeyboardButton('🔴 Fermer session',callback_data='close_session')],[InlineKeyboardButton('👢 Non-participants',callback_data='nonparticipants_prompt')],[InlineKeyboardButton('🚫 Mots interdits',callback_data='words_menu')],[InlineKeyboardButton('⛔ Mots bannis',callback_data='hard_menu')],[InlineKeyboardButton('👤 Usernames interdits',callback_data='users_menu')],[InlineKeyboardButton('📣 Publicité partage',callback_data='share_menu')],[InlineKeyboardButton('📢 Broadcast privé',callback_data='broadcast_set')],[InlineKeyboardButton('📡 Rediffusion ON/OFF',callback_data='toggle_rediff')],[InlineKeyboardButton('🔇 Sanctions visibles ON/OFF',callback_data='toggle_silent')],[InlineKeyboardButton('🏆 Classement ON/OFF',callback_data='toggle_leaderboard')],[InlineKeyboardButton('🧪 Auto-test',callback_data='autotest')],[InlineKeyboardButton('ℹ️ Info système',callback_data='system_info')]])
+async def main_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('🎭 Participation ON/OFF',callback_data='toggle_participation')],
+        [InlineKeyboardButton('🟢 Ouvrir session',callback_data='open_session')],
+        [InlineKeyboardButton('🔴 Fermer session',callback_data='close_session')],
+        [InlineKeyboardButton('⏰ Ouverture auto ON/OFF',callback_data='toggle_auto_schedule')],
+        [InlineKeyboardButton('👢 Non-participants',callback_data='nonparticipants_prompt')],
+        [InlineKeyboardButton('🚫 Mots interdits',callback_data='words_menu')],
+        [InlineKeyboardButton('⛔ Mots bannis',callback_data='hard_words_menu')],
+        [InlineKeyboardButton('👤 Usernames interdits',callback_data='usernames_menu')],
+        [InlineKeyboardButton('📣 Publicité partage',callback_data='share_pub_menu')],
+        [InlineKeyboardButton('📢 Broadcast privé',callback_data='broadcast_private_set')],
+        [InlineKeyboardButton('📡 Rediffusion ON/OFF',callback_data='toggle_rediffusion')],
+        [InlineKeyboardButton('🔇 Sanctions visibles ON/OFF',callback_data='toggle_silent')],
+        [InlineKeyboardButton('🏆 Classement ON/OFF',callback_data='toggle_leaderboard')],
+        [InlineKeyboardButton('🧪 Auto-test',callback_data='autotest')],
+        [InlineKeyboardButton('ℹ️ Info système',callback_data='system_info')],
+    ])
+
 async def st_kb(): return InlineKeyboardMarkup([[InlineKeyboardButton('👀 Voir mots interdits',callback_data='st_words')],[InlineKeyboardButton('➕ Ajouter mot interdit',callback_data='st_add')],[InlineKeyboardButton('📊 Stats 7 jours',callback_data='st_stats7')],[InlineKeyboardButton('📈 Historique complet',callback_data='st_statsall')]])
 async def panel_text():
     sess = await get_open_session()
     st = '🟢 ouverte #' + str(sess['id']) if sess else '🔴 fermée'
-    return f'🛠️ Panel admin\n\nSession {st}\nParticipation {await get_setting("participation","on")}\nMessages visibles {await get_setting("silent_sanctions","on")}\nRediffusion {await get_setting("rediffusion_enabled","off")}\nClassement {await get_setting("leaderboard_enabled","on")}\nNon-participants {await get_setting("nonparticipant_enabled","on")}\n\nVersion: {APP_VERSION}'
+    auto = await get_setting('auto_schedule_enabled','off')
+    return f'🛠️ Panel admin\n\nSession {st}\nOuverture auto {auto}\nParticipation {await get_setting("participation","on")}\nMessages visibles {await get_setting("silent_sanctions","on")}\nRediffusion {await get_setting("rediffusion_enabled","off")}\nClassement {await get_setting("leaderboard_enabled","on")}\nNon-participants {await get_setting("nonparticipant_enabled","on")}\n\nVersion: {APP_VERSION}'
+
 async def start(update,ctx):
     u=update.effective_user
     if update.effective_chat.type=='private': await track_private(u)
@@ -530,6 +586,11 @@ async def callbacks(update,ctx):
     if data=='st_add' and (u.id in SUPER_TRUSTED_IDS or is_admin(u.id)): await set_state(u.id,'st_add'); await q.edit_message_text('Envoie le mot interdit.',reply_markup=back()); return
     if data in ('st_stats7','st_statsall') and (u.id in SUPER_TRUSTED_IDS or is_admin(u.id)): await q.edit_message_text(await trusted_stats(ctx,7 if data=='st_stats7' else None),reply_markup=await st_kb()); return
     if not is_admin(u.id): return
+    if data=='toggle_auto_schedule':
+        cur=await get_setting('auto_schedule_enabled','off')
+        await set_setting('auto_schedule_enabled','off' if cur=='on' else 'on')
+        await q.edit_message_text(await panel_text(),reply_markup=await main_kb())
+        return
     if data=='info': await q.edit_message_text(await panel_text(),reply_markup=await main_kb()); return
     if data=='toggle_participation': await set_setting('participation','off' if await get_setting('participation','on')=='on' else 'on'); await q.edit_message_text(await panel_text(),reply_markup=await main_kb()); return
     if data=='open_session': sid=await open_session_admin(ctx); await q.edit_message_text(f'🟢 Session ouverte #{sid}',reply_markup=await main_kb()); return
@@ -603,7 +664,9 @@ def build_app():
     app.add_handler(CommandHandler('pasfr',trusted_pasfr,filters=filters.Chat(GROUP_ID))); app.add_handler(CommandHandler('ban',trusted_ban,filters=filters.Chat(GROUP_ID))); app.add_handler(CommandHandler('pedo',trusted_pedo,filters=filters.Chat(GROUP_ID)))
     app.add_handler(CallbackQueryHandler(callbacks)); app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND,private_admin))
     app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & filters.COMMAND,handle_group_command)); app.add_handler(MessageHandler(filters.Chat(GROUP_ID) & ~filters.COMMAND,handle_group_message))
-    app.add_handler(ChatMemberHandler(chat_member_update,ChatMemberHandler.CHAT_MEMBER)); return app
+    app.add_handler(ChatMemberHandler(chat_member_update,ChatMemberHandler.CHAT_MEMBER));
+    if app.job_queue: app.job_queue.run_repeating(auto_schedule_tick,interval=60,first=20)
+    return app
 
 def main(): print(f'STARTING {APP_VERSION}',flush=True); build_app().run_polling(allowed_updates=Update.ALL_TYPES)
 if __name__=='__main__': main()

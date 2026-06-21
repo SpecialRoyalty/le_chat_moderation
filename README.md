@@ -1,4 +1,4 @@
-# FINAL_CLEAN_V2_SESSIONS_NONPARTICIPANTS
+# FINAL_CLEAN_V3_SESSION_PUBLIC_AUTO
 
 Version propre recodée depuis le cahier des charges validé.
 
@@ -68,3 +68,10 @@ SELFTEST OK
 
 ## V2
 Sessions, info système, auto-test, non-participants, messages 30s.
+
+
+## V3_SESSION_PUBLIC_AUTO
+- ouverture/fermeture publient dans le groupe ;
+- bouton ouverture auto ON/OFF remis ;
+- état auto visible dans panel/info ;
+- job auto présent sans horaires configurés.

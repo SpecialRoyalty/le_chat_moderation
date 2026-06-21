@@ -23,3 +23,13 @@ assert 'nonparticipant_seen' in bot
 assert 'open_session_admin' in bot
 assert 'build_system_info' in bot
 assert 'run_admin_autotest' in bot
+
+def test_v3_session_public_auto():
+    assert 'FINAL_CLEAN_V3_SESSION_PUBLIC_AUTO' in bot
+    assert 'SESSION PUBLIC OPEN MESSAGE' in bot
+    assert 'SESSION PUBLIC CLOSE MESSAGE' in bot
+    assert 'toggle_auto_schedule' in bot
+    assert 'auto_schedule_enabled' in bot
+    assert 'run_repeating(auto_schedule_tick' in bot
+test_v3_session_public_auto()
+print('V3 SELFTEST OK')

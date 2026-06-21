@@ -12,7 +12,7 @@ try:
 except Exception:
     cv2 = None
 
-APP_VERSION='FINAL_CLEAN_V13_NAME_FIXES_AUTO_LOGS'
+APP_VERSION='FINAL_CLEAN_V14_HASH_MEDIA_WAIT_FIX'
 BOT_TOKEN=os.getenv('BOT_TOKEN','').strip(); DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 GROUP_ID=int(os.getenv('GROUP_ID','0') or '0'); BOT_USERNAME=os.getenv('BOT_USERNAME','').strip().lstrip('@')
 TZ=ZoneInfo(os.getenv('TZ','Europe/Paris'))
@@ -1132,6 +1132,35 @@ async def start(update,ctx):
 async def list_values(table,col):
     async with db_pool.acquire() as con: rows=await con.fetch(f'SELECT {col} v FROM {table} ORDER BY {col}')
     return '📋 Liste\n\n'+('\n'.join('• '+r['v'] for r in rows) if rows else 'Vide.')
+async def add_banned_hashes_from_message_v14(ctx, msg, actor_id:int):
+    if not has_media(msg):
+        return 0, 0, 'Aucun média détecté.'
+    try:
+        keys, hashable = await media_keys(ctx, msg)
+    except Exception as e:
+        print(f'HASH MEDIA WAIT ERROR media_keys actor={actor_id}: {e}', flush=True)
+        return 0, 0, f'Erreur calcul hash: {e}'
+    if not keys:
+        return 0, 0, 'Hash impossible.'
+
+    new_count = 0
+    duplicate_count = 0
+    async with db_pool.acquire() as con:
+        for h in keys:
+            exists = await con.fetchval('SELECT 1 FROM banned_hashes WHERE hash=$1', h)
+            if exists:
+                duplicate_count += 1
+                continue
+            try:
+                await con.execute('INSERT INTO banned_hashes(hash,created_at,added_by) VALUES($1,NOW(),$2)', h, actor_id)
+                new_count += 1
+            except Exception:
+                duplicate_count += 1
+
+    print(f'HASH MEDIA WAIT STORED actor={actor_id} new={new_count} duplicate={duplicate_count} keys={keys}', flush=True)
+    return new_count, duplicate_count, 'OK'
+
+
 async def add_banned_hashes_from_message_v10(ctx, msg, actor_id:int):
     if not has_media(msg):
         return 0, 'Aucun média détecté.'
@@ -1296,6 +1325,7 @@ async def callbacks(update,ctx):
         table,col={'words_list':('banned_words','word'),'hard_list':('banned_words_hard','word'),'users_list':('forbidden_usernames','pattern')}[data]; await q.edit_message_text(await list_values(table,col),reply_markup=await main_kb()); return
     if data=='hash_media_set':
         await set_state(q.from_user.id,'hash_media_wait')
+        print(f'HASH MEDIA WAIT SET admin={q.from_user.id}', flush=True)
         await q.edit_message_text('🧬 Envoie maintenant le média à ajouter aux hash bannis.\n\nEnsuite, toute personne qui publie ce média sera bannie.',reply_markup=back_kb())
         return
 
@@ -1355,6 +1385,32 @@ async def private_admin(update,ctx):
     if state=='share_text': await set_setting('share_pub_text',text); await set_state(u.id,None); await msg.reply_text('✅ OK.'); return
     if state=='share_photo' and msg.photo: await set_setting('share_pub_photo_file_id',msg.photo[-1].file_id); await set_state(u.id,None); await msg.reply_text('✅ OK.'); return
     if state=='broadcast_set': await set_state(u.id,None); await msg.reply_text(f'✅ Envoyé à {await broadcast(ctx,text)} utilisateurs.'); return
+    if state=='hash_media_wait':
+        if not is_admin(u.id):
+            return
+        if not has_media(msg):
+            await msg.reply_text('❌ Envoie une photo ou une vidéo à ajouter aux hash bannis.')
+            return
+
+        new_count, duplicate_count, detail = await add_banned_hashes_from_message_v14(ctx, msg, u.id)
+
+        if new_count > 0:
+            await set_state(u.id, None)
+            await msg.reply_text(
+                f'✅ Média ajouté aux hash bannis.\n'
+                f'Nouveaux hash : {new_count}\n'
+                f'Déjà présents : {duplicate_count}\n\n'
+                f'Toute republication entraînera un bannissement automatique.'
+            )
+            return
+
+        if duplicate_count > 0:
+            await msg.reply_text('ℹ️ Hash identique : ce média est déjà dans les hash bannis. Envoie un autre média ou retourne au panel.')
+            return
+
+        await msg.reply_text(f'❌ Aucun hash ajouté. {detail}')
+        return
+
 async def add_value(table,col,val):
     val=(val or '').strip().lower()
     if table in {'banned_words','banned_words_hard','forbidden_usernames'} and val:
@@ -1397,6 +1453,7 @@ def build_app():
     app.add_handler(ChatMemberHandler(chat_member_update,ChatMemberHandler.CHAT_MEMBER));
     if app.job_queue: app.job_queue.run_repeating(auto_schedule_tick,interval=60,first=20)
     app.add_error_handler(error_handler_v13)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.PHOTO | filters.VIDEO | filters.Document.ALL), private_admin))
     return app
 
 def main(): print(f'STARTING {APP_VERSION}',flush=True); build_app().run_polling(allowed_updates=Update.ALL_TYPES)

@@ -1,4 +1,4 @@
-# FINAL_CLEAN_V13_NAME_FIXES_AUTO_LOGS
+# FINAL_CLEAN_V14_HASH_MEDIA_WAIT_FIX
 
 Version propre recodée depuis le cahier des charges validé.
 
@@ -183,3 +183,12 @@ Corrections :
   - `AUTO OPENING REMINDER CHECK no_send`
 
 Note : dimanche, avec ouverture 22h30, il n'y a pas de rappel à 21h00. Premier rappel attendu : 21h30.
+
+## V14_HASH_MEDIA_WAIT_FIX
+
+Correction bouton `🧬 Hash média` :
+- `hash_media_wait` traite maintenant les médias envoyés en privé ;
+- média nouveau : ajout dans `banned_hashes` + confirmation ;
+- même média : réponse `Hash identique`;
+- handler privé accepte texte/photo/vidéo/document ;
+- logs `HASH MEDIA WAIT SET` et `HASH MEDIA WAIT STORED`.

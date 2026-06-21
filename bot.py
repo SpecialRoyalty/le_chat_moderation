@@ -12,7 +12,7 @@ try:
 except Exception:
     cv2 = None
 
-APP_VERSION='FINAL_CLEAN_V15_CLOSED_SILENT_REFERRAL_10MIN'
+APP_VERSION='FINAL_CLEAN_V16_CLOSED_LOCKDOWN_REFERRAL_COUNTER'
 BOT_TOKEN=os.getenv('BOT_TOKEN','').strip(); DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 GROUP_ID=int(os.getenv('GROUP_ID','0') or '0'); BOT_USERNAME=os.getenv('BOT_USERNAME','').strip().lstrip('@')
 TZ=ZoneInfo(os.getenv('TZ','Europe/Paris'))
@@ -814,6 +814,70 @@ def is_join_left_service_message(msg) -> bool:
     )
 
 
+def has_any_content_v16(msg) -> bool:
+    return bool(
+        getattr(msg,'text',None) or getattr(msg,'caption',None) or
+        getattr(msg,'photo',None) or getattr(msg,'video',None) or
+        getattr(msg,'animation',None) or getattr(msg,'document',None) or
+        getattr(msg,'sticker',None) or getattr(msg,'voice',None) or
+        getattr(msg,'video_note',None) or getattr(msg,'audio',None) or
+        getattr(msg,'contact',None) or getattr(msg,'location',None) or
+        getattr(msg,'venue',None) or getattr(msg,'poll',None) or
+        getattr(msg,'dice',None) or getattr(msg,'game',None) or
+        getattr(msg,'invoice',None) or getattr(msg,'successful_payment',None)
+    )
+
+
+def has_any_media_or_attachment_v16(msg) -> bool:
+    return bool(
+        getattr(msg,'photo',None) or getattr(msg,'video',None) or
+        getattr(msg,'animation',None) or getattr(msg,'document',None) or
+        getattr(msg,'sticker',None) or getattr(msg,'voice',None) or
+        getattr(msg,'video_note',None) or getattr(msg,'audio',None)
+    )
+
+
+def has_admin_or_any_mention_v16(msg) -> bool:
+    txt = raw_message_text(msg) if 'raw_message_text' in globals() else (getattr(msg,'text',None) or getattr(msg,'caption',None) or '')
+    if '@' in (txt or ''):
+        return True
+    ents = (getattr(msg,'entities',None) or []) + (getattr(msg,'caption_entities',None) or [])
+    for ent in ents:
+        if getattr(ent,'type',None) in ('mention','text_mention'):
+            return True
+    return False
+
+
+def is_any_slash_command_v16(msg) -> bool:
+    txt = (raw_message_text(msg) if 'raw_message_text' in globals() else (getattr(msg,'text',None) or getattr(msg,'caption',None) or '')).strip()
+    return txt.startswith('/')
+
+
+async def increment_referral_counter_v16(con, row):
+    cols = set(row.keys())
+    referrer_col = None
+    for c in ('referrer_id','inviter_id','user_id','owner_id'):
+        if c in cols:
+            referrer_col = c
+            break
+    if not referrer_col:
+        print(f'REFERRAL COUNTER NO_REFERRER_COL cols={cols}', flush=True)
+        return False
+    referrer_id = row[referrer_col]
+    # Recalcule compteur depuis referrals validés plutôt que d'incrémenter une colonne inconnue.
+    try:
+        await con.execute("""
+            INSERT INTO leaderboard_rank_cache(user_id,score,updated_at)
+            VALUES($1, COALESCE((SELECT COUNT(*) FROM referrals WHERE referrer_id=$1 AND COALESCE(validated,false)=true),0), NOW())
+            ON CONFLICT(user_id) DO UPDATE SET score=EXCLUDED.score, updated_at=NOW()
+        """, referrer_id)
+        print(f'REFERRAL COUNTER UPDATED referrer={referrer_id}', flush=True)
+        return True
+    except Exception as e:
+        print(f'REFERRAL COUNTER UPDATE SKIPPED referrer={referrer_id}: {e}', flush=True)
+        return False
+
+
 async def closed_session_restrict_silent(ctx, user_id:int, days:int, reason:str):
     until = datetime.now(TZ) + timedelta(days=days)
     try:
@@ -861,20 +925,41 @@ async def closed_session_block(update, ctx) -> bool:
     if await get_open_session():
         return False
 
+    # Session fermée = aucun contenu ne doit rester.
+    # Aucun rappel participation. Seulement pièges silencieux.
     if user and not is_system_or_anonymous_user(user) and not is_protected_user(user.id):
         txt = raw_message_text(msg)
 
-        # Média : hash banni piège et ban silencieux; sinon suppression silencieuse.
-        if has_media(msg):
+        # Commandes admin/trusted ou n'importe quelle commande slash en session fermée:
+        # restriction silencieuse.
+        if is_any_slash_command_v16(msg):
+            await delete_safe(ctx, GROUP_ID, msg.message_id)
+            c = await violation(user.id, 'closed_fake_command')
+            await closed_session_restrict_silent(ctx, user.id, 2 if c <= 1 else min(30, 1+c), 'commande en session fermée')
+            print(f'CLOSED SESSION COMMAND RESTRICT user={user.id} msg={msg.message_id}', flush=True)
+            return True
+
+        # Mentions @admin ou @n'importe qui en session fermée: restriction silencieuse.
+        if has_admin_or_any_mention_v16(msg):
+            await delete_safe(ctx, GROUP_ID, msg.message_id)
+            c = await violation(user.id, 'closed_mention')
+            await closed_session_restrict_silent(ctx, user.id, 1 if c <= 1 else min(30, c), 'mention en session fermée')
+            print(f'CLOSED SESSION MENTION RESTRICT user={user.id} msg={msg.message_id}', flush=True)
+            return True
+
+        # Tous médias/attachments : si hash banni -> ban; sinon suppression silencieuse.
+        if has_any_media_or_attachment_v16(msg):
             try:
-                keys, hashable = await media_keys(ctx, msg)
-                banned = await any_banned(keys)
-                if banned:
-                    print(f'CLOSED SESSION BANNED HASH user={user.id} hash={banned}', flush=True)
-                    await closed_session_ban_silent(update, ctx, 'média hash interdit session fermée')
-                    return True
-                if keys:
-                    await record_media(keys, user.id, GROUP_ID, msg.message_id, media_type(msg))
+                # Hash uniquement pour médias hashables; autres types supprimés quand même.
+                if has_media(msg):
+                    keys, hashable = await media_keys(ctx, msg)
+                    banned = await any_banned(keys)
+                    if banned:
+                        print(f'CLOSED SESSION BANNED HASH user={user.id} hash={banned}', flush=True)
+                        await closed_session_ban_silent(update, ctx, 'média hash interdit session fermée')
+                        return True
+                    if keys:
+                        await record_media(keys, user.id, GROUP_ID, msg.message_id, media_type(msg))
             except Exception as e:
                 print(f'CLOSED SESSION HASH CHECK ERROR user={user.id}: {e}', flush=True)
 
@@ -884,6 +969,7 @@ async def closed_session_block(update, ctx) -> bool:
             await closed_session_ban_silent(update, ctx, 'lien interdit session fermée')
             return True
 
+        # Mots bannis/interdits.
         if txt:
             try:
                 async with db_pool.acquire() as con:
@@ -908,10 +994,12 @@ async def closed_session_block(update, ctx) -> bool:
             except Exception as e:
                 print(f'CLOSED SESSION WORD CHECK ERROR user={user.id}: {e}', flush=True)
 
-    # Session fermée normale : suppression silencieuse totale, aucun rappel participation.
+    # Tout le reste: suppression silencieuse totale.
     await delete_safe(ctx, GROUP_ID, msg.message_id)
-    if user and not is_system_or_anonymous_user(user) and not is_protected_user(user.id):
-        print(f'CLOSED SESSION DELETE SILENT user={user.id} msg={msg.message_id}', flush=True)
+    if user and not is_system_or_anonymous_user(user):
+        print(f'CLOSED SESSION DELETE ANY user={user.id} msg={msg.message_id}', flush=True)
+    else:
+        print(f'CLOSED SESSION DELETE ANY msg={msg.message_id}', flush=True)
     return True
 
 
@@ -1111,43 +1199,34 @@ async def validate_referral_after_10min(ctx, invited_user_id:int):
         return False
 
     async with db_pool.acquire() as con:
-        # V15: compatible avec les structures existantes, on tente plusieurs noms de colonnes.
-        try:
-            row = await con.fetchrow("""
-                SELECT * FROM referrals
-                WHERE invited_id=$1 AND COALESCE(validated,false)=false
-                ORDER BY created_at DESC
-                LIMIT 1
-            """, invited_user_id)
-        except Exception:
+        row = None
+        id_col = None
+        # Compatibilité colonnes connues.
+        for candidate in ('invited_id','referred_id'):
             try:
-                row = await con.fetchrow("""
+                row = await con.fetchrow(f"""
                     SELECT * FROM referrals
-                    WHERE referred_id=$1 AND COALESCE(validated,false)=false
+                    WHERE {candidate}=$1 AND COALESCE(validated,false)=false
                     ORDER BY created_at DESC
                     LIMIT 1
                 """, invited_user_id)
-            except Exception as e:
-                print(f'REFERRAL 10MIN DB SELECT ERROR user={invited_user_id}: {e}', flush=True)
-                return False
+                if row:
+                    id_col = candidate
+                    break
+            except Exception:
+                continue
 
         if not row:
             print(f'REFERRAL 10MIN NO_PENDING user={invited_user_id}', flush=True)
             return False
 
-        # Détection des noms de colonnes.
         cols = set(row.keys())
-        id_col = 'invited_id' if 'invited_id' in cols else ('referred_id' if 'referred_id' in cols else None)
-        if not id_col:
-            print(f'REFERRAL 10MIN NO_ID_COL user={invited_user_id} cols={cols}', flush=True)
-            return False
-
-        # Marque validé avec les colonnes qui existent.
         try:
             if 'validated_at' in cols:
                 await con.execute(f"UPDATE referrals SET validated=true, validated_at=NOW() WHERE {id_col}=$1", invited_user_id)
             else:
                 await con.execute(f"UPDATE referrals SET validated=true WHERE {id_col}=$1", invited_user_id)
+            await increment_referral_counter_v16(con, row)
             print(f'REFERRAL VALIDATED 10MIN user={invited_user_id}', flush=True)
             return True
         except Exception as e:

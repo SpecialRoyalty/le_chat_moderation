@@ -1,4 +1,4 @@
-# FINAL_CLEAN_V15_CLOSED_SILENT_REFERRAL_10MIN
+# FINAL_CLEAN_V16_CLOSED_LOCKDOWN_REFERRAL_COUNTER
 
 Version propre recodée depuis le cahier des charges validé.
 
@@ -218,3 +218,28 @@ Logs :
 - handle_group_message appelait bien closed_session_block avant la logique participation, mais closed_session_block appelait punish_word/punish_ban avec messages publics possibles.
 - Bug trouvé: en session fermée, mot interdit utilisait punish_word(), qui peut déclencher les messages/flows de restriction au lieu d'une suppression silencieuse.
 - En session fermée, les pièges mot banni/hash/lien bannissent bien, mais certains chemins pouvaient aussi envoyer des messages publics.
+
+## V16_CLOSED_LOCKDOWN_REFERRAL_COUNTER
+
+Corrections :
+- Session fermée verrouillée pour tous les types :
+  - photo, video, animation/GIF, document, sticker, voice, video_note, audio, album, texte, caption.
+- Aucun message public en session fermée.
+- Logs obligatoires :
+  - `CLOSED SESSION DELETE ANY`
+  - `CLOSED SESSION COMMAND RESTRICT`
+  - `CLOSED SESSION MENTION RESTRICT`
+- Pièges session fermée :
+  - hash banni => ban silencieux
+  - mot banni => ban silencieux
+  - lien => ban silencieux
+  - mot interdit => restriction silencieuse
+  - slash-commandes / @mentions => restriction silencieuse
+- Invitation validée après 10 minutes de présence.
+- Compteur parrainage mis à jour en direct après validation 10 minutes quand la structure DB le permet.
+
+## Audit V16
+- V15 supprimait silencieusement une partie des messages fermés, mais ne garantissait pas tous les types Telegram.
+- V16 verrouille photo, video, animation/GIF, document, sticker, voice, video_note, audio, texte, caption et autres contenus.
+- V16 ajoute restriction silencieuse pour slash-commandes et mentions @ pendant session fermée.
+- V16 met à jour le compteur de parrainage après validation 10 minutes via leaderboard_rank_cache quand la structure le permet.

@@ -1,4 +1,4 @@
-# FINAL_CLEAN_V11_RESTRICT_VISIBILITY
+# FINAL_CLEAN_V12_KICK_NOTICES_CLEANUP
 
 Version propre recodée depuis le cahier des charges validé.
 
@@ -160,3 +160,14 @@ Corrections :
 - le bouton `🧬 Hash média` reste disponible dans le panel admin;
 - restriction = mute + retrait d'accès temporaire jusqu'à fin de restriction;
 - admins / super trusted / trusted restent protégés des sanctions auto.
+
+## V12_KICK_NOTICES_CLEANUP
+
+Correction kick non-participants :
+- pendant l'expulsion, les notifications Telegram natives `Bot removed X` restent visibles ;
+- elles sont enregistrées dans `nonparticipant_kick_messages`;
+- à la fermeture, elles sont supprimées avec les autres messages de kick/règles/rappels ;
+- les join/left normaux hors kick restent supprimés immédiatement.
+Logs :
+- `NONPARTICIPANT KICK NOTICE KEPT`
+- `NONPARTICIPANT KICK CLEANUP`

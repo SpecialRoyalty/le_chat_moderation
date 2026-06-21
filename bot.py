@@ -12,7 +12,7 @@ try:
 except Exception:
     cv2 = None
 
-APP_VERSION='FINAL_CLEAN_V11_RESTRICT_VISIBILITY'
+APP_VERSION='FINAL_CLEAN_V12_KICK_NOTICES_CLEANUP'
 BOT_TOKEN=os.getenv('BOT_TOKEN','').strip(); DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 GROUP_ID=int(os.getenv('GROUP_ID','0') or '0'); BOT_USERNAME=os.getenv('BOT_USERNAME','').strip().lstrip('@')
 TZ=ZoneInfo(os.getenv('TZ','Europe/Paris'))
@@ -30,7 +30,7 @@ MSG_FORWARD_FORBIDDEN='🚫 Les transferts texte ne sont pas autorisés.'; MSG_G
 MSG_FAKE_COMMAND='🔇 Commande réservée à la modération. Si vous essayez, vous êtes sanctionné.'
 MSG_PASFR='⚠️ Merci d’envoyer uniquement du contenu FR.'; MSG_PUB_ATTEMPT='🚫 Tentative de publicité interdite.'
 
-DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','nonparticipant_enabled':'on','nonparticipant_threshold_open_days':'3','auto_schedule_enabled':'off','schedule_json':'{"0":[["22:00","00:00"]],"1":[["22:00","00:00"]],"2":[["22:00","00:00"]],"3":[["22:00","00:00"]],"4":[["22:00","00:00"]],"5":[["23:00","01:00"]],"6":[["22:30","00:15"]]}','session_status_message_id':'','session_status_chat_id':'','last_midscan_key':'','anti_repost_enabled':'on','auto_reminders_sent':'{}','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':'','rule1_text':'','rule1_photo_file_id':'','rule2_text':'','rule2_photo_file_id':'','rules_posted_session_id':'','rules_message_ids':'[]'}
+DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','nonparticipant_enabled':'on','nonparticipant_threshold_open_days':'3','auto_schedule_enabled':'off','schedule_json':'{"0":[["22:00","00:00"]],"1":[["22:00","00:00"]],"2":[["22:00","00:00"]],"3":[["22:00","00:00"]],"4":[["22:00","00:00"]],"5":[["23:00","01:00"]],"6":[["22:30","00:15"]]}','session_status_message_id':'','session_status_chat_id':'','last_midscan_key':'','anti_repost_enabled':'on','auto_reminders_sent':'{}','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':'','rule1_text':'','rule1_photo_file_id':'','rule2_text':'','rule2_photo_file_id':'','rules_posted_session_id':'','rules_message_ids':'[]','nonparticipant_kick_active_session_id':''}
 TABLES=[
 "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)",
 "CREATE TABLE IF NOT EXISTS admin_states(user_id BIGINT PRIMARY KEY,state TEXT,payload TEXT,updated_at TIMESTAMP DEFAULT NOW())",
@@ -558,6 +558,8 @@ async def send_nonparticipant_prompt(ctx,admin_id):
     await ctx.bot.send_message(admin_id,f'📊 Non-participants détectés\n\n{len(rows)} comptes éligibles.\n\nCe bouton sert à forcer maintenant le scan non-participants. En automatique, le bot vous contacte au milieu de la session.\n\nCombien souhaitez-vous expulser ?\nRépondez par un chiffre. Si vous ne répondez rien, aucune action.')
 async def kick_nonparticipants_public(ctx,count):
     rows=await eligible_nonparticipants(count); sess=await get_open_session(); sid=int(sess['id']) if sess else None; kicked=0
+    if sid:
+        await set_setting('nonparticipant_kick_active_session_id', str(sid))
     for r in rows:
         uid=int(r['user_id'])
         if is_protected_user(uid): continue
@@ -576,11 +578,22 @@ async def kick_nonparticipants_public(ctx,count):
         if sid:
             async with db_pool.acquire() as con: await con.execute('INSERT INTO nonparticipant_kick_messages(chat_id,message_id,session_id,created_at) VALUES($1,$2,$3,NOW()) ON CONFLICT(chat_id,message_id) DO NOTHING',GROUP_ID,m.message_id,sid)
     except Exception as e: print(f'NON_PARTICIPANT FINAL WARNING ERROR: {e}',flush=True)
+    await set_setting('nonparticipant_kick_active_session_id','')
     return kicked
-async def cleanup_nonparticipant_kick_messages(ctx,session_id):
-    async with db_pool.acquire() as con: rows=await con.fetch('SELECT chat_id,message_id FROM nonparticipant_kick_messages WHERE session_id=$1',session_id)
-    for r in rows: await delete_safe(ctx,r['chat_id'],r['message_id']); await asyncio.sleep(.02)
-    async with db_pool.acquire() as con: await con.execute('DELETE FROM nonparticipant_kick_messages WHERE session_id=$1',session_id)
+async def cleanup_nonparticipant_kick_messages(ctx, sid:int):
+    async with db_pool.acquire() as con:
+        rows = await con.fetch('SELECT chat_id,message_id FROM nonparticipant_kick_messages WHERE session_id=$1', sid)
+    total = 0
+    for r in rows:
+        await delete_safe(ctx, r['chat_id'], r['message_id'])
+        total += 1
+        await asyncio.sleep(0.02)
+    async with db_pool.acquire() as con:
+        await con.execute('DELETE FROM nonparticipant_kick_messages WHERE session_id=$1', sid)
+    await set_setting('nonparticipant_kick_active_session_id','')
+    print(f'NONPARTICIPANT KICK CLEANUP sid={sid} total={total}', flush=True)
+
+
 async def build_system_info(ctx):
     lines=['ℹ️ Info système','',f'Version : {APP_VERSION}']
     try:
@@ -902,6 +915,23 @@ async def handle_group_message(update,ctx):
         return
 
     if is_join_left_service_message(msg):
+        # Pendant le kick non-participants, on laisse visibles les notifications Telegram natives
+        # du type "Bot removed X", mais on les enregistre pour suppression à la fermeture.
+        active_sid = await get_setting('nonparticipant_kick_active_session_id','')
+        if getattr(msg, 'left_chat_member', None) and active_sid:
+            try:
+                await save_message(GROUP_ID, msg.message_id, None, True)
+                async with db_pool.acquire() as con:
+                    await con.execute('''
+                        INSERT INTO nonparticipant_kick_messages(chat_id,message_id,session_id,created_at)
+                        VALUES($1,$2,$3,NOW())
+                        ON CONFLICT(chat_id,message_id) DO NOTHING
+                    ''', GROUP_ID, msg.message_id, int(active_sid))
+                print(f'NONPARTICIPANT KICK NOTICE KEPT sid={active_sid} msg={msg.message_id}', flush=True)
+            except Exception as e:
+                print(f'NONPARTICIPANT KICK NOTICE TRACK ERROR msg={msg.message_id}: {e}', flush=True)
+            return
+
         await delete_safe(ctx, GROUP_ID, msg.message_id)
         print(f"JOIN_LEFT SERVICE DELETE msg={msg.message_id}", flush=True)
         if getattr(msg, "new_chat_members", None):

@@ -1,4 +1,4 @@
-# FINAL_CLEAN_V4_SESSION_FIX
+# FINAL_CLEAN_V5_SESSION_CLOSED_REDIF_FIX
 
 Version propre recodée depuis le cahier des charges validé.
 
@@ -84,3 +84,14 @@ Corrections :
 - callbacks du panel réalignés : mots bannis, usernames, pub partage, broadcast ;
 - ouverture auto utilise `schedule_json` si configuré.
 - Format `schedule_json` : `{"5":[["23:00","01:00"]],"6":[["22:30","00:15"]]}`
+
+## V5_SESSION_CLOSED_REDIF_FIX
+
+Corrections :
+- session fermée : tout message/service est supprimé immédiatement ;
+- join/left/service messages supprimés ;
+- plus d'avertissement participation au bot lui-même ;
+- fermeture édite le message de session sans afficher le nombre de suppressions au public ;
+- boutons ON/OFF avec vert/rouge ;
+- `send_super_trusted_report` restauré ;
+- rediffusion renforcée avec logs `REDIFFUSION COPY OK/ERROR`.

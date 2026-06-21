@@ -12,7 +12,7 @@ try:
 except Exception:
     cv2 = None
 
-APP_VERSION='FINAL_CLEAN_V4_SESSION_FIX'
+APP_VERSION='FINAL_CLEAN_V5_SESSION_CLOSED_REDIF_FIX'
 BOT_TOKEN=os.getenv('BOT_TOKEN','').strip(); DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 GROUP_ID=int(os.getenv('GROUP_ID','0') or '0'); BOT_USERNAME=os.getenv('BOT_USERNAME','').strip().lstrip('@')
 TZ=ZoneInfo(os.getenv('TZ','Europe/Paris'))
@@ -239,6 +239,21 @@ async def purge_session_messages(ctx,sid:int):
     return total
 
 
+async def send_super_trusted_report(ctx, title: str):
+    if not SUPER_TRUSTED_IDS:
+        return
+    try:
+        stats = await build_trusted_stats_text(ctx, None)
+    except Exception:
+        stats = "Aucune statistique disponible."
+    text = f"{title}\n\n{stats}"
+    for uid in SUPER_TRUSTED_IDS:
+        try:
+            await ctx.bot.send_message(uid, text)
+        except Exception as e:
+            print(f"SUPER TRUSTED REPORT SEND ERROR user={uid}: {e}", flush=True)
+
+
 async def open_session_admin(ctx=None):
     async with db_pool.acquire() as con:
         row=await con.fetchrow('SELECT id FROM sessions WHERE is_open=TRUE ORDER BY id DESC LIMIT 1')
@@ -276,7 +291,7 @@ async def close_session_admin(ctx=None):
         except Exception as e:
             print(f'NONPARTICIPANT CLEANUP CLOSE ERROR: {e}',flush=True)
         try:
-            await send_or_edit_session_status(ctx,sid,f'🔴 Session fermée\n\nMerci à tous les participants.\nMessages supprimés : {deleted}')
+            await send_or_edit_session_status(ctx,sid,'🔴 Session fermée\n\nMerci à tous les participants.')
         except Exception as e:
             print(f'SESSION PUBLIC CLOSE STATUS ERROR #{sid}: {e}',flush=True)
         try:
@@ -610,20 +625,65 @@ async def send_share(update,ctx):
     rank=await share_rank(u.id); await update.message.reply_text(f'🤝 Votre lien personnel\n\n{link}\n\n✅ Invitations validées : {await share_count(u.id)}\n🏆 Votre rang actuel : {"#"+str(rank) if rank else "non classé"}\n\nPartagez ce lien pour monter dans le classement.')
 
 # group handler priority
+def is_join_left_service_message(msg) -> bool:
+    return bool(
+        getattr(msg, "new_chat_members", None)
+        or getattr(msg, "left_chat_member", None)
+        or getattr(msg, "new_chat_title", None)
+        or getattr(msg, "new_chat_photo", None)
+        or getattr(msg, "delete_chat_photo", None)
+        or getattr(msg, "group_chat_created", None)
+        or getattr(msg, "supergroup_chat_created", None)
+        or getattr(msg, "channel_chat_created", None)
+    )
+
+
+async def closed_session_block(update, ctx) -> bool:
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg:
+        return True
+    if await get_open_session():
+        return False
+    # Quand session fermée, aucun contenu public ne doit rester.
+    await delete_safe(ctx, GROUP_ID, msg.message_id)
+    if user and not is_system_or_anonymous_user(user) and not is_protected_user(user.id):
+        print(f"CLOSED SESSION DELETE user={user.id} msg={msg.message_id}", flush=True)
+    return True
+
+
 async def handle_group_message(update,ctx):
-    msg=update.effective_message; user=update.effective_user
-    if not msg or not user: return
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg:
+        return
+
+    if is_join_left_service_message(msg):
+        await delete_safe(ctx, GROUP_ID, msg.message_id)
+        print(f"JOIN_LEFT SERVICE DELETE msg={msg.message_id}", flush=True)
+        if getattr(msg, "new_chat_members", None):
+            for joined in msg.new_chat_members:
+                if is_system_or_anonymous_user(joined):
+                    continue
+                if getattr(joined, "is_bot", False) and not is_protected_user(joined.id):
+                    try:
+                        await ctx.bot.ban_chat_member(GROUP_ID, joined.id)
+                        print(f"BOT JOIN BAN user={joined.id}", flush=True)
+                    except Exception as ex:
+                        print(f"BOT JOIN BAN ERROR: {ex}", flush=True)
+                    continue
+                await ban_for_forbidden_username(ctx, joined)
+        return
+
+    if not user or is_system_or_anonymous_user(user):
+        return
+
+    if await closed_session_block(update, ctx):
+        return
+
     await save_message(GROUP_ID,msg.message_id,user.id,False,getattr(msg,'media_group_id',None)); await track_open_session_presence(user)
     if is_system_or_anonymous_user(user): return
     text=msg_text(msg); protected=is_protected_user(user.id)
-    if getattr(msg,'new_chat_members',None):
-        for j in msg.new_chat_members:
-            if is_system_or_anonymous_user(j): continue
-            if getattr(j,'is_bot',False) and not is_protected_user(j.id):
-                try: await ctx.bot.ban_chat_member(GROUP_ID,j.id)
-                except Exception as e: print(f'BOT JOIN BAN ERROR: {e}',flush=True)
-            else: await ban_for_username(ctx,j)
-        return
     keys=[]; hashable=False
     if has_media(msg):
         keys,hashable=await media_keys(ctx,msg)
@@ -663,6 +723,19 @@ async def chat_member_update(update,ctx):
         await ban_for_username(ctx,user)
 
 # rediffusion
+async def rediffuse_media_if_enabled(update, ctx):
+    if await get_setting('rediffusion_enabled','off')!='on':
+        return
+    msg = update.effective_message
+    if not msg or not REDIFFUSION_GROUP_ID or not message_has_photo_video(msg):
+        return
+    try:
+        await ctx.bot.copy_message(chat_id=REDIFFUSION_GROUP_ID, from_chat_id=GROUP_ID, message_id=msg.message_id)
+        print(f'REDIFFUSION COPY OK msg={msg.message_id} target={REDIFFUSION_GROUP_ID}', flush=True)
+    except Exception as e:
+        print(f'REDIFFUSION COPY ERROR msg={msg.message_id} target={REDIFFUSION_GROUP_ID}: {e}', flush=True)
+
+
 async def validate_rediff(ctx):
     if not REDIFFUSION_GROUP_ID: return False,'❌ REDIFFUSION_GROUP_ID n’est pas configuré.'
     try:
@@ -677,20 +750,25 @@ async def rediffuse(ctx,msg):
 # panels (clean minimal)
 def back(): return InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Retour',callback_data='info')]])
 async def main_kb():
+    part = '🟢 Participation ON' if await get_setting('participation','on')=='on' else '🔴 Participation OFF'
+    auto = '🟢 Ouverture auto ON' if await get_setting('auto_schedule_enabled','off')=='on' else '🔴 Ouverture auto OFF'
+    red = '🟢 Rediffusion ON' if await get_setting('rediffusion_enabled','off')=='on' else '🔴 Rediffusion OFF'
+    vis = '🟢 Sanctions visibles ON' if await get_setting('silent_sanctions','on')=='on' else '🔴 Sanctions visibles OFF'
+    lb = '🟢 Classement ON' if await get_setting('leaderboard_enabled','on')=='on' else '🔴 Classement OFF'
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('🎭 Participation ON/OFF',callback_data='toggle_participation')],
+        [InlineKeyboardButton(part,callback_data='toggle_participation')],
         [InlineKeyboardButton('🟢 Ouvrir session',callback_data='open_session')],
         [InlineKeyboardButton('🔴 Fermer session',callback_data='close_session')],
-        [InlineKeyboardButton('⏰ Ouverture auto ON/OFF',callback_data='toggle_auto_schedule')],
+        [InlineKeyboardButton(auto,callback_data='toggle_auto_schedule')],
         [InlineKeyboardButton('👢 Non-participants',callback_data='nonparticipants_prompt')],
         [InlineKeyboardButton('🚫 Mots interdits',callback_data='words_menu')],
         [InlineKeyboardButton('⛔ Mots bannis',callback_data='hard_menu')],
         [InlineKeyboardButton('👤 Usernames interdits',callback_data='users_menu')],
         [InlineKeyboardButton('📣 Publicité partage',callback_data='share_menu')],
         [InlineKeyboardButton('📢 Broadcast privé',callback_data='broadcast_set')],
-        [InlineKeyboardButton('📡 Rediffusion ON/OFF',callback_data='toggle_rediffusion')],
-        [InlineKeyboardButton('🔇 Sanctions visibles ON/OFF',callback_data='toggle_silent')],
-        [InlineKeyboardButton('🏆 Classement ON/OFF',callback_data='toggle_leaderboard')],
+        [InlineKeyboardButton(red,callback_data='toggle_rediffusion')],
+        [InlineKeyboardButton(vis,callback_data='toggle_silent')],
+        [InlineKeyboardButton(lb,callback_data='toggle_leaderboard')],
         [InlineKeyboardButton('🧪 Auto-test',callback_data='autotest')],
         [InlineKeyboardButton('ℹ️ Info système',callback_data='system_info')],
     ])

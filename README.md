@@ -1,4 +1,4 @@
-# FINAL_CLEAN_V8_HASH_PRIORITY_SAFE
+# FINAL_CLEAN_V9_RULES_GROUP_BROADCAST
 
 Version propre recodée depuis le cahier des charges validé.
 
@@ -129,3 +129,14 @@ Correction sécurité :
   2. anti-repost via `any_existing`
   3. stockage hash après acceptation
 - même logique en session ouverte et fermée.
+
+## V9_RULES_GROUP_BROADCAST
+
+Ajouté :
+- bouton `📣 Broadcast groupe` : admin publie texte ou photo+légende dans le groupe.
+- bouton `📜 Règles` :
+  - règle 1 texte/image
+  - règle 2 texte/image
+  - aperçu
+- En ouverture AUTO, chaque règle configurée est publiée une fois à un moment aléatoire de la session.
+- Les messages de règles sont supprimés à la fermeture.

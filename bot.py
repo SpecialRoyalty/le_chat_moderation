@@ -12,7 +12,7 @@ try:
 except Exception:
     cv2 = None
 
-APP_VERSION='FINAL_CLEAN_V8_HASH_PRIORITY_SAFE'
+APP_VERSION='FINAL_CLEAN_V9_RULES_GROUP_BROADCAST'
 BOT_TOKEN=os.getenv('BOT_TOKEN','').strip(); DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 GROUP_ID=int(os.getenv('GROUP_ID','0') or '0'); BOT_USERNAME=os.getenv('BOT_USERNAME','').strip().lstrip('@')
 TZ=ZoneInfo(os.getenv('TZ','Europe/Paris'))
@@ -30,7 +30,7 @@ MSG_FORWARD_FORBIDDEN='🚫 Les transferts texte ne sont pas autorisés.'; MSG_G
 MSG_FAKE_COMMAND='🔇 Commande réservée à la modération. Si vous essayez, vous êtes sanctionné.'
 MSG_PASFR='⚠️ Merci d’envoyer uniquement du contenu FR.'; MSG_PUB_ATTEMPT='🚫 Tentative de publicité interdite.'
 
-DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','nonparticipant_enabled':'on','nonparticipant_threshold_open_days':'3','auto_schedule_enabled':'off','schedule_json':'{"0":[["22:00","00:00"]],"1":[["22:00","00:00"]],"2":[["22:00","00:00"]],"3":[["22:00","00:00"]],"4":[["22:00","00:00"]],"5":[["23:00","01:00"]],"6":[["22:30","00:15"]]}','session_status_message_id':'','session_status_chat_id':'','last_midscan_key':'','anti_repost_enabled':'on','auto_reminders_sent':'{}','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':''}
+DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','nonparticipant_enabled':'on','nonparticipant_threshold_open_days':'3','auto_schedule_enabled':'off','schedule_json':'{"0":[["22:00","00:00"]],"1":[["22:00","00:00"]],"2":[["22:00","00:00"]],"3":[["22:00","00:00"]],"4":[["22:00","00:00"]],"5":[["23:00","01:00"]],"6":[["22:30","00:15"]]}','session_status_message_id':'','session_status_chat_id':'','last_midscan_key':'','anti_repost_enabled':'on','auto_reminders_sent':'{}','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':'','rule1_text':'','rule1_photo_file_id':'','rule2_text':'','rule2_photo_file_id':'','rules_posted_session_id':'','rules_message_ids':'[]'}
 TABLES=[
 "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)",
 "CREATE TABLE IF NOT EXISTS admin_states(user_id BIGINT PRIMARY KEY,state TEXT,payload TEXT,updated_at TIMESTAMP DEFAULT NOW())",
@@ -306,6 +306,7 @@ async def close_session_admin(ctx=None):
             print(f'SESSION PURGE ERROR #{sid}: {e}',flush=True)
         try:
             await cleanup_nonparticipant_kick_messages(ctx,sid)
+            await cleanup_rules_messages(ctx,sid)
         except Exception as e:
             print(f'NONPARTICIPANT CLEANUP CLOSE ERROR: {e}',flush=True)
         try:
@@ -501,7 +502,8 @@ async def auto_schedule_tick(ctx):
         await maybe_mid_session_nonparticipant_prompt(ctx,start,end)
         if not sess:
             print(f'AUTO SCHEDULE OPEN start={start} end={end}',flush=True)
-            await open_session_admin(ctx)
+            sid = await open_session_admin(ctx)
+            await maybe_publish_auto_rules(ctx, sid, start, end)
         return
 
     if now>end and sess:
@@ -993,6 +995,8 @@ async def main_kb():
         [InlineKeyboardButton('👤 Usernames interdits',callback_data='users_menu')],
         [InlineKeyboardButton('📣 Publicité partage',callback_data='share_menu')],
         [InlineKeyboardButton('📢 Broadcast privé',callback_data='broadcast_set')],
+        [InlineKeyboardButton('📣 Broadcast groupe',callback_data='group_broadcast_set')],
+        [InlineKeyboardButton('📜 Règles',callback_data='rules_menu')],
         [InlineKeyboardButton(red,callback_data='toggle_rediffusion')],
         [InlineKeyboardButton(vis,callback_data='toggle_silent')],
         [InlineKeyboardButton(lb,callback_data='toggle_leaderboard')],
@@ -1018,6 +1022,94 @@ async def start(update,ctx):
 async def list_values(table,col):
     async with db_pool.acquire() as con: rows=await con.fetch(f'SELECT {col} v FROM {table} ORDER BY {col}')
     return '📋 Liste\n\n'+('\n'.join('• '+r['v'] for r in rows) if rows else 'Vide.')
+async def send_configured_rule(ctx, rule_no:int):
+    text = await get_setting(f'rule{rule_no}_text','')
+    photo = await get_setting(f'rule{rule_no}_photo_file_id','')
+    if not text and not photo:
+        print(f'RULE {rule_no} SKIPPED: empty', flush=True)
+        return None
+    try:
+        if photo:
+            msg = await ctx.bot.send_photo(GROUP_ID, photo=photo, caption=text or None)
+        else:
+            msg = await ctx.bot.send_message(GROUP_ID, text)
+        await save_message(GROUP_ID, msg.message_id, None, True)
+        print(f'RULE {rule_no} POSTED msg={msg.message_id}', flush=True)
+        return msg.message_id
+    except Exception as e:
+        print(f'RULE {rule_no} POST ERROR: {e}', flush=True)
+        return None
+
+
+async def maybe_publish_auto_rules(ctx, sid:int, start, end):
+    # Publie chaque règle une seule fois pendant la session auto.
+    posted = await get_setting('rules_posted_session_id','')
+    if posted == str(sid):
+        return
+    await set_setting('rules_posted_session_id', str(sid))
+    ids = []
+    # "Aléatoirement" pendant la session: on choisit 2 délais pseudo-aléatoires mais bornés.
+    # Si session trop courte, les règles partent vite mais une seule fois.
+    import random
+    duration = max(60, int((end-start).total_seconds()))
+    delays = sorted([
+        random.randint(60, max(61, min(duration-60, duration//3))) if duration > 180 else 20,
+        random.randint(max(60, duration//2), max(61, duration-60)) if duration > 180 else 40,
+    ])
+    async def later(rule_no, delay):
+        await asyncio.sleep(delay)
+        # Ne publie que si la session est toujours ouverte.
+        sess = await get_open_session()
+        if not sess or int(sess['id']) != int(sid):
+            return
+        mid = await send_configured_rule(ctx, rule_no)
+        if mid:
+            raw = await get_setting('rules_message_ids','[]')
+            try:
+                arr = json.loads(raw or '[]')
+            except Exception:
+                arr = []
+            arr.append([GROUP_ID, mid, sid])
+            await set_setting('rules_message_ids', json.dumps(arr))
+    ctx.application.create_task(later(1, delays[0]))
+    ctx.application.create_task(later(2, delays[1]))
+    print(f'RULES AUTO SCHEDULED sid={sid} delays={delays}', flush=True)
+
+
+async def cleanup_rules_messages(ctx, sid:int):
+    raw = await get_setting('rules_message_ids','[]')
+    try:
+        arr = json.loads(raw or '[]')
+    except Exception:
+        arr = []
+    keep = []
+    for item in arr:
+        try:
+            chat_id, mid, item_sid = item
+            if int(item_sid) == int(sid):
+                await delete_safe(ctx, int(chat_id), int(mid))
+                print(f'RULE MESSAGE DELETE sid={sid} msg={mid}', flush=True)
+            else:
+                keep.append(item)
+        except Exception as e:
+            print(f'RULE MESSAGE DELETE ERROR item={item}: {e}', flush=True)
+    await set_setting('rules_message_ids', json.dumps(keep))
+
+
+async def broadcast_group(ctx, text:str, photo_file_id:str=''):
+    try:
+        if photo_file_id:
+            msg = await ctx.bot.send_photo(GROUP_ID, photo=photo_file_id, caption=text or None)
+        else:
+            msg = await ctx.bot.send_message(GROUP_ID, text)
+        await save_message(GROUP_ID, msg.message_id, None, True)
+        print(f'GROUP BROADCAST SENT msg={msg.message_id}', flush=True)
+        return msg.message_id
+    except Exception as e:
+        print(f'GROUP BROADCAST ERROR: {e}', flush=True)
+        return None
+
+
 async def callbacks(update,ctx):
     q=update.callback_query
     try: await q.answer()
@@ -1074,6 +1166,43 @@ async def callbacks(update,ctx):
     if data.endswith('_add') or data.endswith('_del'): await set_state(u.id,data); await q.edit_message_text('Envoie la valeur.',reply_markup=back()); return
     if data.endswith('_list'):
         table,col={'words_list':('banned_words','word'),'hard_list':('banned_words_hard','word'),'users_list':('forbidden_usernames','pattern')}[data]; await q.edit_message_text(await list_values(table,col),reply_markup=await main_kb()); return
+    if data=='group_broadcast_set':
+        await set_state(q.from_user.id,'group_broadcast')
+        await q.edit_message_text('📣 Envoie le message à publier dans le groupe. Tu peux envoyer texte ou photo avec légende.',reply_markup=back_kb())
+        return
+
+    if data=='rules_menu':
+        await q.edit_message_text('📜 Règles automatiques\n\nChaque règle peut avoir un texte et/ou une image. En ouverture AUTO, chaque règle est publiée une fois à un moment aléatoire de la session, puis supprimée à la fermeture.',reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton('1️⃣ Règle 1',callback_data='rule1_menu')],
+            [InlineKeyboardButton('2️⃣ Règle 2',callback_data='rule2_menu')],
+            [InlineKeyboardButton('⬅️ Retour',callback_data='info')]
+        ]))
+        return
+
+    if data in ('rule1_menu','rule2_menu'):
+        n='1' if data=='rule1_menu' else '2'
+        await q.edit_message_text(f'📜 Règle {n}',reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton('✏️ Texte',callback_data=f'rule{n}_text_set')],
+            [InlineKeyboardButton('🖼️ Image',callback_data=f'rule{n}_photo_set')],
+            [InlineKeyboardButton('👀 Aperçu',callback_data=f'rule{n}_preview')],
+            [InlineKeyboardButton('⬅️ Retour',callback_data='rules_menu')]
+        ]))
+        return
+
+    if data in ('rule1_text_set','rule2_text_set','rule1_photo_set','rule2_photo_set'):
+        await set_state(q.from_user.id,data)
+        kind='texte' if 'text' in data else 'image'
+        await q.edit_message_text(f'Envoie le {kind} pour {data[:5]}.',reply_markup=back_kb())
+        return
+
+    if data in ('rule1_preview','rule2_preview'):
+        n=1 if data=='rule1_preview' else 2
+        text=await get_setting(f'rule{n}_text','')
+        photo=await get_setting(f'rule{n}_photo_file_id','')
+        status=f'Texte: {"✅" if text else "❌"}\nImage: {"✅" if photo else "❌"}'
+        await q.edit_message_text(f'👀 Aperçu règle {n}\n\n{status}\n\n{text or "(aucun texte)"}',reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⬅️ Retour',callback_data=f'rule{n}_menu')]]))
+        return
+
     if data=='share_menu': await q.edit_message_text('Publicité partage',reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('✏️ Texte',callback_data='share_text')],[InlineKeyboardButton('🖼️ Image',callback_data='share_photo')],[InlineKeyboardButton('📣 Publier',callback_data='share_publish')],[InlineKeyboardButton('⬅️ Retour',callback_data='info')]])); return
     if data in ('share_text','share_photo','broadcast_set'): await set_state(u.id,data); await q.edit_message_text('Envoie maintenant.',reply_markup=back()); return
     if data=='share_publish': await publish_share(ctx); await q.edit_message_text('✅ Pub publiée',reply_markup=await main_kb()); return

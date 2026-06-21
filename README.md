@@ -1,4 +1,4 @@
-# FINAL_CLEAN_V5_SESSION_CLOSED_REDIF_FIX
+# FINAL_CLEAN_V6_GLOBAL_STATUS_AUTO_MIDSCAN
 
 Version propre recodée depuis le cahier des charges validé.
 
@@ -95,3 +95,13 @@ Corrections :
 - boutons ON/OFF avec vert/rouge ;
 - `send_super_trusted_report` restauré ;
 - rediffusion renforcée avec logs `REDIFFUSION COPY OK/ERROR`.
+
+## V6_GLOBAL_STATUS_AUTO_MIDSCAN
+
+Corrections :
+- un seul message global de session, même après plusieurs ouvertures/fermetures ;
+- fermeture et ouverture éditent toujours ce message global ;
+- rediffusion ON affiche une erreur claire si le bot n'est pas admin ou si REDIFFUSION_GROUP_ID est mauvais ;
+- auto ON : si `schedule_json` est configuré, le bot ouvre/ferme automatiquement ;
+- au milieu d'une session automatique, le bot contacte les admins pour proposer le kick non-participants ;
+- le bouton `👢 Non-participants` sert seulement à forcer ce scan manuellement.

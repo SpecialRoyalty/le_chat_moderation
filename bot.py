@@ -12,7 +12,7 @@ try:
 except Exception:
     cv2 = None
 
-APP_VERSION='FINAL_CLEAN_V5_SESSION_CLOSED_REDIF_FIX'
+APP_VERSION='FINAL_CLEAN_V6_GLOBAL_STATUS_AUTO_MIDSCAN'
 BOT_TOKEN=os.getenv('BOT_TOKEN','').strip(); DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 GROUP_ID=int(os.getenv('GROUP_ID','0') or '0'); BOT_USERNAME=os.getenv('BOT_USERNAME','').strip().lstrip('@')
 TZ=ZoneInfo(os.getenv('TZ','Europe/Paris'))
@@ -30,7 +30,7 @@ MSG_FORWARD_FORBIDDEN='🚫 Les transferts texte ne sont pas autorisés.'; MSG_G
 MSG_FAKE_COMMAND='🔇 Commande réservée à la modération. Si vous essayez, vous êtes sanctionné.'
 MSG_PASFR='⚠️ Merci d’envoyer uniquement du contenu FR.'; MSG_PUB_ATTEMPT='🚫 Tentative de publicité interdite.'
 
-DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','nonparticipant_enabled':'on','nonparticipant_threshold_open_days':'3','auto_schedule_enabled':'off','schedule_json':'{}','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':''}
+DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','nonparticipant_enabled':'on','nonparticipant_threshold_open_days':'3','auto_schedule_enabled':'off','schedule_json':'{}','session_status_message_id':'','session_status_chat_id':'','last_midscan_key':'','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':''}
 TABLES=[
 "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)",
 "CREATE TABLE IF NOT EXISTS admin_states(user_id BIGINT PRIMARY KEY,state TEXT,payload TEXT,updated_at TIMESTAMP DEFAULT NOW())",
@@ -204,40 +204,44 @@ async def get_open_session():
     async with db_pool.acquire() as con:
         return await con.fetchrow('SELECT * FROM sessions WHERE is_open=TRUE ORDER BY id DESC LIMIT 1')
 async def send_or_edit_session_status(ctx, sid:int, text:str):
-    async with db_pool.acquire() as con:
-        row=await con.fetchrow('SELECT status_message_id,status_chat_id FROM sessions WHERE id=$1',sid)
-    mid=row['status_message_id'] if row else None
-    chat_id=row['status_chat_id'] if row and row['status_chat_id'] else GROUP_ID
+    mid_raw = await get_setting('session_status_message_id','')
+    chat_raw = await get_setting('session_status_chat_id','')
+    mid = int(mid_raw) if str(mid_raw).isdigit() else None
+    chat_id = int(chat_raw) if str(chat_raw).lstrip('-').isdigit() else GROUP_ID
     if mid:
         try:
-            await ctx.bot.edit_message_text(chat_id=chat_id,message_id=mid,text=text)
-            print(f'SESSION STATUS EDIT sid={sid} msg={mid}',flush=True)
+            await ctx.bot.edit_message_text(chat_id=chat_id, message_id=mid, text=text)
+            print(f'SESSION GLOBAL STATUS EDIT sid={sid} msg={mid}', flush=True)
             return mid
         except Exception as e:
-            print(f'SESSION STATUS EDIT ERROR sid={sid} msg={mid}: {e}',flush=True)
-    msg=await ctx.bot.send_message(GROUP_ID,text)
-    await save_message(GROUP_ID,msg.message_id,None,True)
+            print(f'SESSION GLOBAL STATUS EDIT ERROR sid={sid} msg={mid}: {e}', flush=True)
+            # If Telegram cannot edit old/deleted message, create a new global one.
+    msg = await ctx.bot.send_message(GROUP_ID, text)
+    await save_message(GROUP_ID, msg.message_id, None, True)
+    await set_setting('session_status_message_id', str(msg.message_id))
+    await set_setting('session_status_chat_id', str(GROUP_ID))
     async with db_pool.acquire() as con:
-        await con.execute('UPDATE sessions SET status_message_id=$2,status_chat_id=$3 WHERE id=$1',sid,msg.message_id,GROUP_ID)
-    print(f'SESSION STATUS SEND sid={sid} msg={msg.message_id}',flush=True)
+        await con.execute('UPDATE sessions SET status_message_id=$2,status_chat_id=$3 WHERE id=$1', sid, msg.message_id, GROUP_ID)
+    print(f'SESSION GLOBAL STATUS SEND sid={sid} msg={msg.message_id}', flush=True)
     return msg.message_id
 
-
 async def purge_session_messages(ctx,sid:int):
+    global_mid_raw = await get_setting('session_status_message_id','')
+    global_mid = int(global_mid_raw) if str(global_mid_raw).isdigit() else None
     async with db_pool.acquire() as con:
         status_mid=await con.fetchval('SELECT status_message_id FROM sessions WHERE id=$1',sid)
         rows=await con.fetch('SELECT chat_id,message_id,is_system FROM messages WHERE session_id=$1 ORDER BY created_at ASC',sid)
     total=0
     print(f'SESSION DELETE START sid={sid} candidates={len(rows)}',flush=True)
     for r in rows:
-        if status_mid and int(r['message_id'])==int(status_mid):
+        mid = int(r['message_id'])
+        if (status_mid and mid==int(status_mid)) or (global_mid and mid==global_mid):
             continue
         await delete_safe(ctx,r['chat_id'],r['message_id'])
         total+=1
         await asyncio.sleep(0.015)
     print(f'SESSION DELETE END sid={sid} total={total}',flush=True)
     return total
-
 
 async def send_super_trusted_report(ctx, title: str):
     if not SUPER_TRUSTED_IDS:
@@ -368,6 +372,30 @@ async def get_today_schedule_window():
     return None
 
 
+async def maybe_mid_session_nonparticipant_prompt(ctx, start, end):
+    if await get_setting('nonparticipant_enabled','on')!='on':
+        return
+    now=datetime.now(TZ)
+    duration=(end-start).total_seconds()
+    if duration <= 0:
+        return
+    middle=start + timedelta(seconds=duration/2)
+    # Trigger within the minute after midpoint.
+    if not (middle <= now < middle + timedelta(seconds=70)):
+        return
+    key=f"{start.isoformat()}_{end.isoformat()}"
+    if await get_setting('last_midscan_key','')==key:
+        return
+    await set_setting('last_midscan_key',key)
+    rows=await eligible_nonparticipants()
+    print(f'NON_PARTICIPANT MIDSCAN eligible={len(rows)} key={key}',flush=True)
+    for admin_id in ADMIN_IDS:
+        try:
+            await send_nonparticipant_prompt(ctx, admin_id)
+        except Exception as e:
+            print(f'NON_PARTICIPANT MIDSCAN PROMPT ERROR admin={admin_id}: {e}',flush=True)
+
+
 async def auto_schedule_tick(ctx):
     if await get_setting('auto_schedule_enabled','off')!='on':
         return
@@ -378,6 +406,8 @@ async def auto_schedule_tick(ctx):
     start,end=window
     now=datetime.now(TZ)
     sess=await get_open_session()
+    if start<=now<=end:
+        await maybe_mid_session_nonparticipant_prompt(ctx,start,end)
     if start<=now<=end and not sess:
         print(f'AUTO SCHEDULE OPEN start={start} end={end}',flush=True)
         await open_session_admin(ctx)
@@ -396,7 +426,7 @@ async def auto_schedule_tick(ctx):
 
 async def send_nonparticipant_prompt(ctx,admin_id):
     rows=await eligible_nonparticipants(); await set_state(admin_id,'nonparticipant_kick_count')
-    await ctx.bot.send_message(admin_id,f'📊 Non-participants détectés\n\n{len(rows)} comptes éligibles.\n\nCombien souhaitez-vous expulser ?\nRépondez par un chiffre. Si vous ne répondez rien, aucune action.')
+    await ctx.bot.send_message(admin_id,f'📊 Non-participants détectés\n\n{len(rows)} comptes éligibles.\n\nCe bouton sert à forcer maintenant le scan non-participants. En automatique, le bot vous contacte au milieu de la session.\n\nCombien souhaitez-vous expulser ?\nRépondez par un chiffre. Si vous ne répondez rien, aucune action.')
 async def kick_nonparticipants_public(ctx,count):
     rows=await eligible_nonparticipants(count); sess=await get_open_session(); sid=int(sess['id']) if sess else None; kicked=0
     for r in rows:
@@ -737,11 +767,17 @@ async def rediffuse_media_if_enabled(update, ctx):
 
 
 async def validate_rediff(ctx):
-    if not REDIFFUSION_GROUP_ID: return False,'❌ REDIFFUSION_GROUP_ID n’est pas configuré.'
+    if not REDIFFUSION_GROUP_ID:
+        return False, 'REDIFFUSION_GROUP_ID manquant'
     try:
-        me=await ctx.bot.get_me(); m=await ctx.bot.get_chat_member(REDIFFUSION_GROUP_ID,me.id)
-        return (m.status in ('administrator','creator')),('✅ Rediffusion connectée.' if m.status in ('administrator','creator') else '❌ Le bot doit être admin dans le groupe de rediffusion.')
-    except Exception as e: return False,f'❌ Rediffusion non connectée : {e}'
+        me = await ctx.bot.get_me()
+        member = await ctx.bot.get_chat_member(REDIFFUSION_GROUP_ID, me.id)
+        if member.status not in ('administrator','creator'):
+            return False, f'bot non admin dans cible ({member.status})'
+        return True, 'OK'
+    except Exception as e:
+        return False, str(e)
+
 async def rediffuse(ctx,msg):
     if await get_setting('rediffusion_enabled','off')!='on' or not REDIFFUSION_GROUP_ID: return
     try: await ctx.bot.copy_message(REDIFFUSION_GROUP_ID,GROUP_ID,msg.message_id); print(f'REDIFFUSION COPY OK msg={msg.message_id}',flush=True)
@@ -811,6 +847,20 @@ async def callbacks(update,ctx):
     if data=='nonparticipants_prompt': await send_nonparticipant_prompt(ctx,u.id); await q.edit_message_text('📩 Demande envoyée en privé. Répondez avec le nombre à expulser.',reply_markup=await main_kb()); return
     if data=='system_info': await q.edit_message_text(await build_system_info(ctx),reply_markup=await main_kb()); return
     if data=='autotest': await q.edit_message_text(await run_admin_autotest(ctx),reply_markup=await main_kb()); return
+    if data=='toggle_rediffusion':
+        cur=await get_setting('rediffusion_enabled','off')
+        if cur=='on':
+            await set_setting('rediffusion_enabled','off')
+            await q.edit_message_text(await panel_text(),reply_markup=await main_kb())
+            return
+        ok,msg=await validate_rediff(ctx)
+        if not ok:
+            await q.edit_message_text('❌ Rediffusion impossible\n\n'+str(msg),reply_markup=await main_kb())
+            return
+        await set_setting('rediffusion_enabled','on')
+        await q.edit_message_text(await panel_text(),reply_markup=await main_kb())
+        return
+
     if data=='toggle_silent': await set_setting('silent_sanctions','off' if await get_setting('silent_sanctions','on')=='on' else 'on'); await q.edit_message_text(await panel_text(),reply_markup=await main_kb()); return
     if data=='toggle_leaderboard': await set_setting('leaderboard_enabled','off' if await get_setting('leaderboard_enabled','on')=='on' else 'on'); await q.edit_message_text(await panel_text(),reply_markup=await main_kb()); return
     if data=='toggle_rediff':

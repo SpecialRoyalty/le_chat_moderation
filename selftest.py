@@ -1,17 +1,16 @@
 from pathlib import Path
 bot=Path('bot.py').read_text(encoding='utf-8')
 
-def test_v5():
-    assert 'FINAL_CLEAN_V5_SESSION_CLOSED_REDIF_FIX' in bot
-    assert 'closed_session_block' in bot
-    assert 'JOIN_LEFT SERVICE DELETE' in bot
-    assert 'send_super_trusted_report' in bot
-    assert 'REDIFFUSION COPY OK' in bot
-    assert '🟢 Participation ON' in bot
-    assert 'Messages supprimés :' not in bot
+def test_v6():
+    assert 'FINAL_CLEAN_V6_GLOBAL_STATUS_AUTO_MIDSCAN' in bot
+    assert 'session_status_message_id' in bot
+    assert 'SESSION GLOBAL STATUS EDIT' in bot
+    assert 'maybe_mid_session_nonparticipant_prompt' in bot
+    assert 'NON_PARTICIPANT MIDSCAN' in bot
+    assert 'Rediffusion impossible' in bot
     assert 'grace_presidentielle' not in bot
     assert 'grace_ministerielle' not in bot
 
 if __name__=='__main__':
-    test_v5()
-    print('V5 SELFTEST OK')
+    test_v6()
+    print('V6 SELFTEST OK')

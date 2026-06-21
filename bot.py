@@ -12,7 +12,7 @@ try:
 except Exception:
     cv2 = None
 
-APP_VERSION='FINAL_CLEAN_V6_GLOBAL_STATUS_AUTO_MIDSCAN'
+APP_VERSION='FINAL_CLEAN_V8_HASH_PRIORITY_SAFE'
 BOT_TOKEN=os.getenv('BOT_TOKEN','').strip(); DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 GROUP_ID=int(os.getenv('GROUP_ID','0') or '0'); BOT_USERNAME=os.getenv('BOT_USERNAME','').strip().lstrip('@')
 TZ=ZoneInfo(os.getenv('TZ','Europe/Paris'))
@@ -30,7 +30,7 @@ MSG_FORWARD_FORBIDDEN='🚫 Les transferts texte ne sont pas autorisés.'; MSG_G
 MSG_FAKE_COMMAND='🔇 Commande réservée à la modération. Si vous essayez, vous êtes sanctionné.'
 MSG_PASFR='⚠️ Merci d’envoyer uniquement du contenu FR.'; MSG_PUB_ATTEMPT='🚫 Tentative de publicité interdite.'
 
-DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','nonparticipant_enabled':'on','nonparticipant_threshold_open_days':'3','auto_schedule_enabled':'off','schedule_json':'{}','session_status_message_id':'','session_status_chat_id':'','last_midscan_key':'','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':''}
+DEFAULT_SETTINGS={'participation':'on','silent_sanctions':'on','rediffusion_enabled':'off','leaderboard_enabled':'on','nonparticipant_enabled':'on','nonparticipant_threshold_open_days':'3','auto_schedule_enabled':'off','schedule_json':'{"0":[["22:00","00:00"]],"1":[["22:00","00:00"]],"2":[["22:00","00:00"]],"3":[["22:00","00:00"]],"4":[["22:00","00:00"]],"5":[["23:00","01:00"]],"6":[["22:30","00:15"]]}','session_status_message_id':'','session_status_chat_id':'','last_midscan_key':'','anti_repost_enabled':'on','auto_reminders_sent':'{}','share_pub_text':'🤝 Partagez le groupe pour monter dans le classement.\nCliquez ci-dessous pour recevoir votre lien personnel.','share_pub_photo_file_id':''}
 TABLES=[
 "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)",
 "CREATE TABLE IF NOT EXISTS admin_states(user_id BIGINT PRIMARY KEY,state TEXT,payload TEXT,updated_at TIMESTAMP DEFAULT NOW())",
@@ -86,6 +86,9 @@ def has_external_link(msg):
     ents=(getattr(msg,'entities',None) or [])+(getattr(msg,'caption_entities',None) or [])
     return any(getattr(e,'type',None) in ('url','text_link') for e in ents)
 def is_live_or_story(msg): return bool(getattr(msg,'video_chat_started',None) or getattr(msg,'video_chat_scheduled',None) or getattr(msg,'story',None))
+
+def plain_name(user):
+    return '@'+user.username if getattr(user,'username',None) else (getattr(user,'first_name',None) or 'Utilisateur')
 
 async def init_db():
     global db_pool
@@ -158,6 +161,17 @@ async def warning(ctx,text,seconds=30,force=False):
     except Exception as e: print(f'WARNING SEND ERROR: {e}',flush=True); return None
 async def participation_warning(ctx,user):
     await warning(ctx,MSG_PARTICIPATION_REQUIRED.format(mention=display(user)),30,True); print(f'PARTICIPATION WARNING SENT user={user.id}',flush=True)
+async def send_always_warning(ctx, text: str, seconds: int = 30):
+    try:
+        msg = await ctx.bot.send_message(GROUP_ID, text)
+        await save_message(GROUP_ID, msg.message_id, None, True)
+        ctx.application.create_task(delete_later(ctx, GROUP_ID, msg.message_id, seconds))
+        return msg
+    except Exception as e:
+        print(f'ALWAYS WARNING ERROR: {e}', flush=True)
+        return None
+
+
 async def notify_admins(ctx,text):
     for uid in set(ADMIN_IDS)|set(SUPER_TRUSTED_IDS):
         try: await ctx.bot.send_message(uid,text)
@@ -372,6 +386,75 @@ async def get_today_schedule_window():
     return None
 
 
+async def auto_reminder_seen(key: str) -> bool:
+    raw = await get_setting('auto_reminders_sent','{}')
+    try:
+        data = json.loads(raw or '{}')
+    except Exception:
+        data = {}
+    return bool(data.get(key))
+
+
+async def mark_auto_reminder_seen(key: str):
+    raw = await get_setting('auto_reminders_sent','{}')
+    try:
+        data = json.loads(raw or '{}')
+    except Exception:
+        data = {}
+    data[key] = True
+    if len(data) > 500:
+        data = dict(list(data.items())[-300:])
+    await set_setting('auto_reminders_sent', json.dumps(data))
+
+
+async def send_auto_reminder_once(ctx, key: str, text: str):
+    if await auto_reminder_seen(key):
+        return
+    await mark_auto_reminder_seen(key)
+    try:
+        msg = await ctx.bot.send_message(GROUP_ID, text)
+        await save_message(GROUP_ID, msg.message_id, None, True)
+        ctx.application.create_task(delete_later(ctx, GROUP_ID, msg.message_id, 30))
+        print(f'AUTO REMINDER SENT key={key}', flush=True)
+    except Exception as e:
+        print(f'AUTO REMINDER ERROR key={key}: {e}', flush=True)
+
+
+def reminder_minute_bucket(delta_seconds: float):
+    mins = int(delta_seconds // 60)
+    if mins > 60 and mins % 60 == 0:
+        return ('hour', mins // 60)
+    if mins in (30,10,5,4,3,2,1):
+        return ('minute', mins)
+    return None
+
+
+async def handle_opening_reminders(ctx, start):
+    now = datetime.now(TZ)
+    delta = (start-now).total_seconds()
+    if delta <= 0:
+        return
+    bucket = reminder_minute_bucket(delta)
+    if not bucket:
+        return
+    typ, val = bucket
+    key = f'open:{start.isoformat()}:{typ}:{val}'
+    text = f'🕒 Le groupe ouvre dans {val} h.' if typ == 'hour' else f'🕒 Le groupe ouvre dans {val} min.'
+    await send_auto_reminder_once(ctx, key, text)
+
+
+async def handle_closing_reminders(ctx, end):
+    now = datetime.now(TZ)
+    delta = (end-now).total_seconds()
+    if delta <= 0:
+        return
+    mins = int(delta // 60)
+    if mins not in (30,15,5,4,3,2,1):
+        return
+    key = f'close:{end.isoformat()}:minute:{mins}'
+    await send_auto_reminder_once(ctx, key, f'⏳ Le groupe ferme dans {mins} min.')
+
+
 async def maybe_mid_session_nonparticipant_prompt(ctx, start, end):
     if await get_setting('nonparticipant_enabled','on')!='on':
         return
@@ -406,18 +489,25 @@ async def auto_schedule_tick(ctx):
     start,end=window
     now=datetime.now(TZ)
     sess=await get_open_session()
-    if start<=now<=end:
-        await maybe_mid_session_nonparticipant_prompt(ctx,start,end)
-    if start<=now<=end and not sess:
-        print(f'AUTO SCHEDULE OPEN start={start} end={end}',flush=True)
-        await open_session_admin(ctx)
-    elif now>end and sess:
-        print(f'AUTO SCHEDULE CLOSE end={end}',flush=True)
-        await close_session_admin(ctx)
-    elif now<start:
+
+    if now < start:
+        await handle_opening_reminders(ctx, start)
         mins=int((start-now).total_seconds()//60)
         print(f'AUTO SCHEDULE COUNTDOWN opening_in_min={mins}',flush=True)
+        return
 
+    if start<=now<=end:
+        await handle_closing_reminders(ctx, end)
+        await maybe_mid_session_nonparticipant_prompt(ctx,start,end)
+        if not sess:
+            print(f'AUTO SCHEDULE OPEN start={start} end={end}',flush=True)
+            await open_session_admin(ctx)
+        return
+
+    if now>end and sess:
+        print(f'AUTO SCHEDULE CLOSE end={end}',flush=True)
+        await close_session_admin(ctx)
+        return
 
 async def auto_schedule_tick(ctx):
     if await get_setting('auto_schedule_enabled','off')!='on':
@@ -482,6 +572,7 @@ async def build_system_info(ctx):
     st='🟢 ouverte #'+str(sess['id']) if sess else '🔴 fermée'
     lines.append(f'Session : {st}')
     lines.append(f'Ouverture auto : {await auto_schedule_status_text()}')
+    lines.append(f'Anti-repost : {await get_setting("anti_repost_enabled","on")}')
     lines.append(f'Horaires JSON : {await get_setting("schedule_json","{}")}')
     try:
         lines.append(f'Non-participants suivis : {await count_nonparticipant_seen()}')
@@ -675,11 +766,75 @@ async def closed_session_block(update, ctx) -> bool:
         return True
     if await get_open_session():
         return False
-    # Quand session fermée, aucun contenu public ne doit rester.
+
+    if user and not is_system_or_anonymous_user(user) and not is_protected_user(user.id):
+        txt = msg_text(msg)
+
+        if has_media(msg):
+            try:
+                keys, hashable = await media_keys(ctx, msg)
+                if await process_media_priority_v8(update, ctx, keys, hashable) == 'stop':
+                    return True
+                # Fermé: on piège et on stocke les hash non-bannis/non-repost, puis on supprime le message.
+                if keys:
+                    await record_media(keys,user.id,GROUP_ID,msg.message_id,media_type(msg))
+            except Exception as e:
+                print(f'CLOSED SESSION HASH CHECK ERROR user={user.id}: {e}', flush=True)
+
+        if txt:
+            try:
+                async with db_pool.acquire() as con:
+                    hard=await con.fetch('SELECT word FROM banned_words_hard')
+                for r in hard:
+                    w=(r['word'] or '').strip().lower()
+                    if w and contains_forbidden_token(txt,w):
+                        print(f'CLOSED SESSION WORD BAN user={user.id} word={w}', flush=True)
+                        await punish_ban(update, ctx, 'mot banni', MSG_GENERIC_FORBIDDEN)
+                        return True
+                async with db_pool.acquire() as con:
+                    words=await con.fetch('SELECT word FROM banned_words')
+                for r in words:
+                    w=(r['word'] or '').strip().lower()
+                    if w and contains_forbidden_token(txt,w):
+                        print(f'CLOSED SESSION WORD FORBIDDEN user={user.id} word={w}', flush=True)
+                        await punish_word(update, ctx, w)
+                        return True
+            except Exception as e:
+                print(f'CLOSED SESSION WORD CHECK ERROR user={user.id}: {e}', flush=True)
+
     await delete_safe(ctx, GROUP_ID, msg.message_id)
     if user and not is_system_or_anonymous_user(user) and not is_protected_user(user.id):
-        print(f"CLOSED SESSION DELETE user={user.id} msg={msg.message_id}", flush=True)
+        print(f'CLOSED SESSION DELETE user={user.id} msg={msg.message_id}', flush=True)
     return True
+
+async def process_media_priority_v8(update, ctx, keys, hashable):
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not user or not keys:
+        return 'ok'
+
+    # V8: priorité absolue au hash banni.
+    banned = await any_banned(keys)
+    if banned:
+        print(f'V8 HASH PRIORITY: BANNED_HASH FIRST user={user.id} hash={banned}', flush=True)
+        if is_protected_user(user.id):
+            await delete_safe(ctx, GROUP_ID, msg.message_id)
+            return 'stop'
+        await punish_ban(update, ctx, 'média interdit', MSG_GENERIC_FORBIDDEN)
+        return 'stop'
+
+    # Anti-repost seulement après avoir vérifié banned_hashes.
+    if await get_setting('anti_repost_enabled','on') == 'on':
+        existing = await any_existing(keys)
+        if existing:
+            print(f'V8 HASH PRIORITY: ANTI_REPOST AFTER_BANNED_CLEAR user={user.id} hash={existing}', flush=True)
+            await delete_safe(ctx, GROUP_ID, msg.message_id)
+            await inc_counter('session_deletions')
+            await warning(ctx, f'{plain_name(user)}, ce média a déjà été publié. Ce soir pas de recyclage, sors tes médias du placard !', 30)
+            await add_danger(user.id, 2, 'repost média')
+            return 'stop'
+
+    return 'ok'
 
 
 async def handle_group_message(update,ctx):
@@ -711,39 +866,73 @@ async def handle_group_message(update,ctx):
     if await closed_session_block(update, ctx):
         return
 
-    await save_message(GROUP_ID,msg.message_id,user.id,False,getattr(msg,'media_group_id',None)); await track_open_session_presence(user)
-    if is_system_or_anonymous_user(user): return
-    text=msg_text(msg); protected=is_protected_user(user.id)
-    keys=[]; hashable=False
+    await save_message(GROUP_ID,msg.message_id,user.id,False,getattr(msg,'media_group_id',None))
+    await track_open_session_presence(user)
+
+    text=msg_text(msg)
+    protected=is_protected_user(user.id)
+    keys=[]
+    hashable=False
+
     if has_media(msg):
         keys,hashable=await media_keys(ctx,msg)
-        banned=await any_banned(keys)
-        if banned:
-            print(f'BANNED HASH MATCH user={user.id} hash={banned}',flush=True)
-            if protected: await delete_safe(ctx,GROUP_ID,msg.message_id); return
-            await punish_ban(update,ctx,'média interdit',MSG_GENERIC_FORBIDDEN); return
+        if await process_media_priority_v8(update,ctx,keys,hashable) == 'stop':
+            return
+
     if text and not protected:
-        async with db_pool.acquire() as con: hard=await con.fetch('SELECT word FROM banned_words_hard')
+        async with db_pool.acquire() as con:
+            hard=await con.fetch('SELECT word FROM banned_words_hard')
         for r in hard:
             w=(r['word'] or '').strip().lower()
-            if w and contains_forbidden_token(text,w): print(f'WORD BAN MATCH user={user.id} word={w}',flush=True); await punish_ban(update,ctx,'mot banni',MSG_GENERIC_FORBIDDEN); await alert_ban(ctx,user,'mot banni dans le message',w); return
-        async with db_pool.acquire() as con: words=await con.fetch('SELECT word FROM banned_words')
+            if w and contains_forbidden_token(text,w):
+                print(f'WORD BAN MATCH user={user.id} word={w}',flush=True)
+                await punish_ban(update,ctx,'mot banni',MSG_GENERIC_FORBIDDEN)
+                await alert_ban(ctx,user,'mot banni dans le message',w)
+                return
+
+        async with db_pool.acquire() as con:
+            words=await con.fetch('SELECT word FROM banned_words')
         for r in words:
             w=(r['word'] or '').strip().lower()
-            if w and contains_forbidden_token(text,w): await punish_word(update,ctx,w); return
+            if w and contains_forbidden_token(text,w):
+                await punish_word(update,ctx,w)
+                return
+
     if not protected:
-        if has_external_link(msg): await punish_ban(update,ctx,'lien interdit',MSG_LINK_FORBIDDEN); return
-        if is_forwarded(msg) and not has_media(msg): await punish_ban(update,ctx,'forward texte interdit',MSG_FORWARD_FORBIDDEN); return
-        if is_live_or_story(msg): await punish_ban(update,ctx,'live/story interdit',MSG_GENERIC_FORBIDDEN); return
+        if has_external_link(msg):
+            await punish_ban(update,ctx,'lien interdit',MSG_LINK_FORBIDDEN)
+            return
+        if is_forwarded(msg) and not has_media(msg):
+            await punish_ban(update,ctx,'forward texte interdit',MSG_FORWARD_FORBIDDEN)
+            return
+        if is_live_or_story(msg):
+            await punish_ban(update,ctx,'live/story interdit',MSG_GENERIC_FORBIDDEN)
+            return
+
     if not protected and has_media(msg) and '@' in (getattr(msg,'caption','') or ''):
-        await delete_safe(ctx,GROUP_ID,msg.message_id); c=await violation(user.id,'media_mention_ad'); await restrict_days(ctx,user.id,max(1,min(c,30)),'media_mention_ad'); await inc_counter('session_mutes'); await warning(ctx,MSG_PUB_ATTEMPT,30); return
+        await delete_safe(ctx,GROUP_ID,msg.message_id)
+        c=await violation(user.id,'media_mention_ad')
+        await restrict_days(ctx,user.id,max(1,min(c,30)),'media_mention_ad')
+        await inc_counter('session_mutes')
+        await warning(ctx,MSG_PUB_ATTEMPT,30)
+        return
+
     if await get_setting('participation','on')=='on' and not protected and not await has_participated(user.id):
-        if not has_media(msg): await delete_safe(ctx,GROUP_ID,msg.message_id); await inc_counter('session_deletions'); print(f'PARTICIPATION REQUIRED TRIGGERED user={user.id}',flush=True); await participation_warning(ctx,user); await add_danger(user.id,1,'message avant participation'); return
+        if not has_media(msg):
+            await delete_safe(ctx,GROUP_ID,msg.message_id)
+            await inc_counter('session_deletions')
+            print(f'PARTICIPATION REQUIRED TRIGGERED user={user.id}',flush=True)
+            await participation_warning(ctx,user)
+            await add_danger(user.id,1,'message avant participation')
+            return
+
+    if await get_setting('participation','on')=='on' and not protected and has_media(msg) and hashable and keys and not await has_participated(user.id):
+        await mark_participated(user,keys[0])
+
     if has_media(msg) and keys:
-        existing=await any_existing(keys)
-        if existing: await delete_safe(ctx,GROUP_ID,msg.message_id); await inc_counter('session_deletions'); await warning(ctx,MSG_REPOST,30); await add_danger(user.id,2,'repost média'); return
-    if await get_setting('participation','on')=='on' and not protected and has_media(msg) and hashable and keys and not await has_participated(user.id): await mark_participated(user,keys[0])
-    if has_media(msg) and keys: await record_media(keys,user.id,GROUP_ID,msg.message_id,media_type(msg)); await rediffuse(ctx,msg)
+        await record_media(keys,user.id,GROUP_ID,msg.message_id,media_type(msg))
+        await rediffuse(ctx,msg)
+
 async def chat_member_update(update,ctx):
     cm=update.chat_member
     if not cm: return
@@ -791,11 +980,13 @@ async def main_kb():
     red = '🟢 Rediffusion ON' if await get_setting('rediffusion_enabled','off')=='on' else '🔴 Rediffusion OFF'
     vis = '🟢 Sanctions visibles ON' if await get_setting('silent_sanctions','on')=='on' else '🔴 Sanctions visibles OFF'
     lb = '🟢 Classement ON' if await get_setting('leaderboard_enabled','on')=='on' else '🔴 Classement OFF'
+    repost = '🟢 Anti-repost ON' if await get_setting('anti_repost_enabled','on')=='on' else '🔴 Anti-repost OFF'
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(part,callback_data='toggle_participation')],
         [InlineKeyboardButton('🟢 Ouvrir session',callback_data='open_session')],
         [InlineKeyboardButton('🔴 Fermer session',callback_data='close_session')],
         [InlineKeyboardButton(auto,callback_data='toggle_auto_schedule')],
+        [InlineKeyboardButton(repost,callback_data='toggle_anti_repost')],
         [InlineKeyboardButton('👢 Non-participants',callback_data='nonparticipants_prompt')],
         [InlineKeyboardButton('🚫 Mots interdits',callback_data='words_menu')],
         [InlineKeyboardButton('⛔ Mots bannis',callback_data='hard_menu')],
@@ -814,7 +1005,8 @@ async def panel_text():
     sess = await get_open_session()
     st = '🟢 ouverte #' + str(sess['id']) if sess else '🔴 fermée'
     auto = await get_setting('auto_schedule_enabled','off')
-    return f'🛠️ Panel admin\n\nSession {st}\nOuverture auto {auto}\nParticipation {await get_setting("participation","on")}\nMessages visibles {await get_setting("silent_sanctions","on")}\nRediffusion {await get_setting("rediffusion_enabled","off")}\nClassement {await get_setting("leaderboard_enabled","on")}\nNon-participants {await get_setting("nonparticipant_enabled","on")}\n\nVersion: {APP_VERSION}'
+    anti = await get_setting('anti_repost_enabled','on')
+    return f'🛠️ Panel admin\n\nSession {st}\nOuverture auto {auto}\nAnti-repost {anti}\nParticipation {await get_setting("participation","on")}\nMessages visibles {await get_setting("silent_sanctions","on")}\nRediffusion {await get_setting("rediffusion_enabled","off")}\nClassement {await get_setting("leaderboard_enabled","on")}\nNon-participants {await get_setting("nonparticipant_enabled","on")}\n\nHoraires auto : Lun-Ven 22h-00h / Sam 23h-01h / Dim 22h30-00h15\n\nVersion: {APP_VERSION}'
 
 async def start(update,ctx):
     u=update.effective_user
@@ -835,6 +1027,12 @@ async def callbacks(update,ctx):
     if data=='st_add' and (u.id in SUPER_TRUSTED_IDS or is_admin(u.id)): await set_state(u.id,'st_add'); await q.edit_message_text('Envoie le mot interdit.',reply_markup=back()); return
     if data in ('st_stats7','st_statsall') and (u.id in SUPER_TRUSTED_IDS or is_admin(u.id)): await q.edit_message_text(await trusted_stats(ctx,7 if data=='st_stats7' else None),reply_markup=await st_kb()); return
     if not is_admin(u.id): return
+    if data=='toggle_anti_repost':
+        cur=await get_setting('anti_repost_enabled','on')
+        await set_setting('anti_repost_enabled','off' if cur=='on' else 'on')
+        await q.edit_message_text(await panel_text(),reply_markup=await main_kb())
+        return
+
     if data=='toggle_auto_schedule':
         cur=await get_setting('auto_schedule_enabled','off')
         await set_setting('auto_schedule_enabled','off' if cur=='on' else 'on')

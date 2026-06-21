@@ -1,4 +1,4 @@
-# FINAL_CLEAN_V6_GLOBAL_STATUS_AUTO_MIDSCAN
+# FINAL_CLEAN_V8_HASH_PRIORITY_SAFE
 
 Version propre recodée depuis le cahier des charges validé.
 
@@ -105,3 +105,27 @@ Corrections :
 - auto ON : si `schedule_json` est configuré, le bot ouvre/ferme automatiquement ;
 - au milieu d'une session automatique, le bot contacte les admins pour proposer le kick non-participants ;
 - le bouton `👢 Non-participants` sert seulement à forcer ce scan manuellement.
+
+## V7_AUTO_REMINDERS_REPOST
+
+Ajouté/corrigé :
+- horaires auto par défaut :
+  - lundi à vendredi : 22:00 → 00:00
+  - samedi : 23:00 → dimanche 01:00
+  - dimanche : 22:30 → lundi 00:15
+- rappels ouverture : toutes les heures, puis 30, 10, 5, 4, 3, 2, 1 min.
+- rappels fermeture : 30, 15, 5, 4, 3, 2, 1 min.
+- fermeture auto/manuelle purge tous les messages depuis la dernière ouverture.
+- même session fermée : mot banni/hash banni piègent et bannissent, mot interdit sanctionne.
+- bouton anti-repost ON/OFF.
+- anti-repost ON : repost supprimé + message personnalisé 30s.
+- anti-repost OFF : hash stocké mais pas de suppression repost.
+
+## V8_HASH_PRIORITY_SAFE
+
+Correction sécurité :
+- ordre hash forcé dans `process_media_priority_v8` :
+  1. `banned_hashes` via `any_banned`
+  2. anti-repost via `any_existing`
+  3. stockage hash après acceptation
+- même logique en session ouverte et fermée.

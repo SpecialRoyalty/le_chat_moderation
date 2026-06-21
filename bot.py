@@ -12,7 +12,7 @@ try:
 except Exception:
     cv2 = None
 
-APP_VERSION='FINAL_CLEAN_V14_HASH_MEDIA_WAIT_FIX'
+APP_VERSION='FINAL_CLEAN_V15_CLOSED_SILENT_REFERRAL_10MIN'
 BOT_TOKEN=os.getenv('BOT_TOKEN','').strip(); DATABASE_URL=os.getenv('DATABASE_URL','').strip()
 GROUP_ID=int(os.getenv('GROUP_ID','0') or '0'); BOT_USERNAME=os.getenv('BOT_USERNAME','').strip().lstrip('@')
 TZ=ZoneInfo(os.getenv('TZ','Europe/Paris'))
@@ -814,6 +814,45 @@ def is_join_left_service_message(msg) -> bool:
     )
 
 
+async def closed_session_restrict_silent(ctx, user_id:int, days:int, reason:str):
+    until = datetime.now(TZ) + timedelta(days=days)
+    try:
+        await ctx.bot.restrict_chat_member(GROUP_ID, user_id, ChatPermissions(can_send_messages=False), until_date=until)
+    except Exception as e:
+        print(f'CLOSED SILENT RESTRICT ERROR user={user_id}: {e}', flush=True)
+    try:
+        await ctx.bot.ban_chat_member(GROUP_ID, user_id, until_date=until)
+        seconds = int((until - datetime.now(TZ)).total_seconds())
+        ctx.application.create_task(unban_later(ctx, user_id, seconds))
+        print(f'CLOSED SILENT VISIBILITY BAN user={user_id} days={days} reason={reason}', flush=True)
+    except Exception as e:
+        print(f'CLOSED SILENT VISIBILITY BAN ERROR user={user_id}: {e}', flush=True)
+    try:
+        async with db_pool.acquire() as con:
+            await con.execute("""
+                INSERT INTO restricted_users(user_id,reason,restricted_until,created_at,updated_at)
+                VALUES($1,$2,$3,NOW(),NOW())
+                ON CONFLICT(user_id) DO UPDATE SET reason=$2,restricted_until=$3,updated_at=NOW()
+            """, user_id, reason, until.replace(tzinfo=None))
+    except Exception as e:
+        print(f'CLOSED SILENT RESTRICT DB ERROR user={user_id}: {e}', flush=True)
+
+
+async def closed_session_ban_silent(update, ctx, reason:str):
+    user = update.effective_user
+    msg = update.effective_message
+    if not user:
+        return
+    try:
+        if msg:
+            await delete_safe(ctx, GROUP_ID, msg.message_id)
+        await ctx.bot.ban_chat_member(GROUP_ID, user.id)
+        await purge_user(ctx, user.id)
+        print(f'CLOSED SILENT BAN user={user.id} reason={reason}', flush=True)
+    except Exception as e:
+        print(f'CLOSED SILENT BAN ERROR user={user.id}: {e}', flush=True)
+
+
 async def closed_session_block(update, ctx) -> bool:
     msg = update.effective_message
     user = update.effective_user
@@ -825,19 +864,24 @@ async def closed_session_block(update, ctx) -> bool:
     if user and not is_system_or_anonymous_user(user) and not is_protected_user(user.id):
         txt = raw_message_text(msg)
 
+        # Média : hash banni piège et ban silencieux; sinon suppression silencieuse.
         if has_media(msg):
             try:
                 keys, hashable = await media_keys(ctx, msg)
-                if await process_media_priority_v8(update, ctx, keys, hashable) == 'stop':
+                banned = await any_banned(keys)
+                if banned:
+                    print(f'CLOSED SESSION BANNED HASH user={user.id} hash={banned}', flush=True)
+                    await closed_session_ban_silent(update, ctx, 'média hash interdit session fermée')
                     return True
                 if keys:
                     await record_media(keys, user.id, GROUP_ID, msg.message_id, media_type(msg))
             except Exception as e:
                 print(f'CLOSED SESSION HASH CHECK ERROR user={user.id}: {e}', flush=True)
 
+        # Lien : piège et ban silencieux.
         if has_link_v10(msg):
             print(f'CLOSED SESSION LINK BAN user={user.id} text={raw_message_text(msg)[:80]}', flush=True)
-            await punish_ban(update, ctx, 'lien interdit session fermée', MSG_LINK_FORBIDDEN)
+            await closed_session_ban_silent(update, ctx, 'lien interdit session fermée')
             return True
 
         if txt:
@@ -848,7 +892,7 @@ async def closed_session_block(update, ctx) -> bool:
                     w = (r['word'] or '').strip().lower()
                     if w and contains_forbidden_token(txt, w):
                         print(f'CLOSED SESSION WORD BAN user={user.id} word={w}', flush=True)
-                        await punish_ban(update, ctx, 'mot banni', MSG_GENERIC_FORBIDDEN)
+                        await closed_session_ban_silent(update, ctx, 'mot banni session fermée')
                         return True
 
                 async with db_pool.acquire() as con:
@@ -857,14 +901,17 @@ async def closed_session_block(update, ctx) -> bool:
                     w = (r['word'] or '').strip().lower()
                     if w and contains_forbidden_token(txt, w):
                         print(f'CLOSED SESSION WORD FORBIDDEN user={user.id} word={w}', flush=True)
-                        await punish_word(update, ctx, w)
+                        await delete_safe(ctx, GROUP_ID, msg.message_id)
+                        c = await violation(user.id, 'closed_forbidden_word')
+                        await closed_session_restrict_silent(ctx, user.id, 3 if c == 1 else min(30, 2+c), 'mot interdit session fermée')
                         return True
             except Exception as e:
                 print(f'CLOSED SESSION WORD CHECK ERROR user={user.id}: {e}', flush=True)
 
+    # Session fermée normale : suppression silencieuse totale, aucun rappel participation.
     await delete_safe(ctx, GROUP_ID, msg.message_id)
     if user and not is_system_or_anonymous_user(user) and not is_protected_user(user.id):
-        print(f'CLOSED SESSION DELETE user={user.id} msg={msg.message_id}', flush=True)
+        print(f'CLOSED SESSION DELETE SILENT user={user.id} msg={msg.message_id}', flush=True)
     return True
 
 
@@ -968,6 +1015,7 @@ async def handle_group_message(update,ctx):
                         print(f"BOT JOIN BAN ERROR: {ex}", flush=True)
                     continue
                 await ban_for_forbidden_username(ctx, joined)
+                await schedule_referral_validation_10min(ctx, joined.id)
         return
 
     if not user or is_system_or_anonymous_user(user):
@@ -1043,6 +1091,69 @@ async def handle_group_message(update,ctx):
     if has_media(msg) and keys:
         await record_media(keys,user.id,GROUP_ID,msg.message_id,media_type(msg))
         await rediffuse(ctx,msg)
+
+async def schedule_referral_validation_10min(ctx, invited_user_id:int):
+    print(f'REFERRAL 10MIN SCHEDULE user={invited_user_id}', flush=True)
+    async def later():
+        await asyncio.sleep(600)
+        await validate_referral_after_10min(ctx, invited_user_id)
+    ctx.application.create_task(later())
+
+
+async def validate_referral_after_10min(ctx, invited_user_id:int):
+    try:
+        member = await ctx.bot.get_chat_member(GROUP_ID, invited_user_id)
+        if member.status in ('left','kicked'):
+            print(f'REFERRAL 10MIN FAILED_LEFT user={invited_user_id} status={member.status}', flush=True)
+            return False
+    except Exception as e:
+        print(f'REFERRAL 10MIN CHECK ERROR user={invited_user_id}: {e}', flush=True)
+        return False
+
+    async with db_pool.acquire() as con:
+        # V15: compatible avec les structures existantes, on tente plusieurs noms de colonnes.
+        try:
+            row = await con.fetchrow("""
+                SELECT * FROM referrals
+                WHERE invited_id=$1 AND COALESCE(validated,false)=false
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, invited_user_id)
+        except Exception:
+            try:
+                row = await con.fetchrow("""
+                    SELECT * FROM referrals
+                    WHERE referred_id=$1 AND COALESCE(validated,false)=false
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, invited_user_id)
+            except Exception as e:
+                print(f'REFERRAL 10MIN DB SELECT ERROR user={invited_user_id}: {e}', flush=True)
+                return False
+
+        if not row:
+            print(f'REFERRAL 10MIN NO_PENDING user={invited_user_id}', flush=True)
+            return False
+
+        # Détection des noms de colonnes.
+        cols = set(row.keys())
+        id_col = 'invited_id' if 'invited_id' in cols else ('referred_id' if 'referred_id' in cols else None)
+        if not id_col:
+            print(f'REFERRAL 10MIN NO_ID_COL user={invited_user_id} cols={cols}', flush=True)
+            return False
+
+        # Marque validé avec les colonnes qui existent.
+        try:
+            if 'validated_at' in cols:
+                await con.execute(f"UPDATE referrals SET validated=true, validated_at=NOW() WHERE {id_col}=$1", invited_user_id)
+            else:
+                await con.execute(f"UPDATE referrals SET validated=true WHERE {id_col}=$1", invited_user_id)
+            print(f'REFERRAL VALIDATED 10MIN user={invited_user_id}', flush=True)
+            return True
+        except Exception as e:
+            print(f'REFERRAL 10MIN UPDATE ERROR user={invited_user_id}: {e}', flush=True)
+            return False
+
 
 async def chat_member_update(update,ctx):
     cm=update.chat_member

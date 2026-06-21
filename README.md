@@ -1,4 +1,4 @@
-# FINAL_CLEAN_V14_HASH_MEDIA_WAIT_FIX
+# FINAL_CLEAN_V15_CLOSED_SILENT_REFERRAL_10MIN
 
 Version propre recodée depuis le cahier des charges validé.
 
@@ -192,3 +192,29 @@ Correction bouton `🧬 Hash média` :
 - même média : réponse `Hash identique`;
 - handler privé accepte texte/photo/vidéo/document ;
 - logs `HASH MEDIA WAIT SET` et `HASH MEDIA WAIT STORED`.
+
+## V15_CLOSED_SILENT_REFERRAL_10MIN
+
+Corrections :
+- session fermée = suppression silencieuse totale ;
+- plus de message “merci de participer” quand le groupe est fermé ;
+- pièges actifs en session fermée :
+  - hash banni => ban silencieux ;
+  - mot banni => ban silencieux ;
+  - lien => ban silencieux ;
+  - mot interdit => restriction silencieuse ;
+- validation invitation après 10 minutes de présence :
+  - au join, le bot planifie une vérification à +10 min ;
+  - si la personne est encore dans le groupe après 10 min, l’invitation est validée ;
+  - si elle a quitté / est kick / est ban, non validée.
+Logs :
+- `CLOSED SESSION DELETE SILENT`
+- `CLOSED SILENT BAN`
+- `REFERRAL 10MIN SCHEDULE`
+- `REFERRAL VALIDATED 10MIN`
+
+
+## Audit V15
+- handle_group_message appelait bien closed_session_block avant la logique participation, mais closed_session_block appelait punish_word/punish_ban avec messages publics possibles.
+- Bug trouvé: en session fermée, mot interdit utilisait punish_word(), qui peut déclencher les messages/flows de restriction au lieu d'une suppression silencieuse.
+- En session fermée, les pièges mot banni/hash/lien bannissent bien, mais certains chemins pouvaient aussi envoyer des messages publics.

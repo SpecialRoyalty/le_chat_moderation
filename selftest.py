@@ -1,29 +1,25 @@
 from pathlib import Path
 bot=Path('bot.py').read_text(encoding='utf-8')
 
-def part(name, async_def=True):
-    marker=('async def ' if async_def else 'def ')+name
-    s=bot.index(marker)
+def part(name):
+    s=bot.index(f'async def {name}')
     e=bot.find('\nasync def ', s+1)
-    e2=bot.find('\ndef ', s+1)
-    ends=[x for x in [e,e2] if x!=-1]
-    end=min(ends) if ends else len(bot)
-    return bot[s:end]
+    return bot[s:e if e!=-1 else len(bot)]
 
-def test_v14():
-    assert 'FINAL_CLEAN_V14_HASH_MEDIA_WAIT_FIX' in bot
-    assert 'add_banned_hashes_from_message_v14' in bot
-    assert 'HASH MEDIA WAIT SET' in bot
-    assert 'HASH MEDIA WAIT STORED' in bot
-    hp=part('private_admin')
-    assert "state=='hash_media_wait'" in hp
-    assert 'Hash identique' in hp
-    assert 'add_banned_hashes_from_message_v14' in hp
-    app=part('build_app', async_def=False)
-    assert 'filters.PHOTO' in app and 'filters.VIDEO' in app
+def test_v15():
+    assert 'FINAL_CLEAN_V15_CLOSED_SILENT_REFERRAL_10MIN' in bot
+    assert 'closed_session_restrict_silent' in bot
+    assert 'closed_session_ban_silent' in bot
+    c=part('closed_session_block')
+    assert 'participation_warning' not in c
+    assert 'CLOSED SESSION DELETE SILENT' in c
+    assert 'punish_word' not in c
+    assert 'REFERRAL 10MIN SCHEDULE' in bot
+    assert 'validate_referral_after_10min' in bot
+    assert 'REFERRAL VALIDATED 10MIN' in bot
     assert 'grace_presidentielle' not in bot
     assert 'grace_ministerielle' not in bot
 
 if __name__=='__main__':
-    test_v14()
-    print('V14 SELFTEST OK')
+    test_v15()
+    print('V15 SELFTEST OK')

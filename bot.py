@@ -347,7 +347,7 @@ async def close_session_admin(ctx=None):
         except Exception as e:
             print(f'NONPARTICIPANT CLEANUP CLOSE ERROR: {e}',flush=True)
         try:
-            await send_or_edit_session_status(ctx,sid,'🔴 Session fermée\n\nMerci à tous les participants d'attendre la prochaine ouverture.')
+            await send_or_edit_session_status(ctx,sid,'🔴 Session fermée\n\nMerci à tous les participants d attendre la prochaine ouverture.')
         except Exception as e:
             print(f'SESSION PUBLIC CLOSE STATUS ERROR #{sid}: {e}',flush=True)
         try:

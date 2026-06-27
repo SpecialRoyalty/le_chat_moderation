@@ -43,7 +43,7 @@ MSG_GENERIC_FORBIDDEN = "🚫 Message non autorisé."
 MSG_FAKE_COMMAND = "🔇 Commande réservée à la modération. Si vous essayez, vous êtes sanctionné."
 MSG_REPOST = "♻️ Ce média a déjà été publié."
 MSG_LINK_FORBIDDEN = "🔗 Les liens ne sont pas autorisés."
-APP_VERSION = "FINAL_COMPLETE_V61_PARTICIPATION_WARNING_FIX"
+APP_VERSION = "FINAL_COMPLETE_V62_FAST_TRUSTED_PRIORITY"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").replace("@", "")
@@ -1278,6 +1278,22 @@ async def ban_hashes_from_user_session(target_user_id: int):
     return len(rows)
 
 
+
+async def bg_task_safe(coro, label: str):
+    try:
+        await coro
+    except Exception as e:
+        print(f"BACKGROUND TASK ERROR {label}: {e}", flush=True)
+
+
+def run_bg(context, coro, label: str):
+    try:
+        context.application.create_task(bg_task_safe(coro, label))
+        print(f"BACKGROUND TASK STARTED {label}", flush=True)
+    except Exception as e:
+        print(f"BACKGROUND TASK START ERROR {label}: {e}", flush=True)
+
+
 async def trusted_supprime_progressive(context, target_id:int):
     if is_protected_user(target_id): return
     async with db_pool.acquire() as con:
@@ -1311,7 +1327,7 @@ async def trusted_supprime(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target = msg.reply_to_message.from_user
 
-    if await is_group_admin(context, target.id) or target.id in TRUSTED_IDS:
+    if await is_group_admin(context, target.id) or is_protected_user(target.id):
         await delete_message_safe(context, msg.chat_id, msg.message_id)
         if not await is_silent():
             warn = await send_temp_message(context, GROUP_ID, "⛔ Action refusée : impossible de cibler un admin, owner ou trusted.", seconds=180)
@@ -1330,7 +1346,7 @@ async def trusted_supprime(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await delete_message_safe(context, msg.chat_id, msg.reply_to_message.message_id)
     await increment_session_counter("session_deletions")  # trusted_supprime
     await delete_message_safe(context, msg.chat_id, msg.message_id)
-    await log_trusted_action(sid, actor.id, "supprime", target.id, msg.reply_to_message.message_id)
+    run_bg(context, log_trusted_action(sid, actor.id, "supprime", target.id, msg.reply_to_message.message_id), 'log_trusted_action')
 
     async with db_pool.acquire() as con:
         row = await con.fetchrow(
@@ -1352,7 +1368,7 @@ async def trusted_supprime(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"TRUSTED MUTE ERROR: {e}", flush=True)
 
-        deleted = await delete_user_session_messages(context, target.id)
+        deleted = run_bg(context, delete_user_session_messages(context, target.id), 'delete_user_session_messages')
         await add_danger(target.id, 5, "trusted strikes")
 async def trusted_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -1370,7 +1386,7 @@ async def trusted_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target = msg.reply_to_message.from_user
 
-    if await is_group_admin(context, target.id) or target.id in TRUSTED_IDS:
+    if await is_group_admin(context, target.id) or is_protected_user(target.id):
         await delete_message_safe(context, msg.chat_id, msg.message_id)
         if not await is_silent():
             warn = await send_temp_message(context, GROUP_ID, "⛔ Action refusée : impossible de cibler un admin, owner ou trusted.", seconds=180)
@@ -1386,10 +1402,10 @@ async def trusted_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await save_message(GROUP_ID, warn.message_id, None, True)
         return
 
-    await log_trusted_action(sid, actor.id, "ban", target.id, msg.reply_to_message.message_id)
+    run_bg(context, log_trusted_action(sid, actor.id, "ban", target.id, msg.reply_to_message.message_id), 'log_trusted_action')
 
     # /ban ne stocke pas les hash. Utiliser /pedo pour interdire les médias.
-    deleted = await delete_user_session_messages(context, target.id)
+    deleted = run_bg(context, delete_user_session_messages(context, target.id), 'delete_user_session_messages')
 
     try:
         await context.bot.ban_chat_member(GROUP_ID, target.id)
@@ -1414,12 +1430,12 @@ async def trusted_pedo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target=msg.reply_to_message.from_user
     if is_protected_user(target.id):
         await delete_message_safe(context,msg.chat_id,msg.message_id)
-        await delete_user_session_messages(context,target.id)
+        run_bg(context, delete_user_session_messages(context,target.id), 'delete_user_session_messages')
         return
     sid=await get_session_for_trusted()
-    await log_trusted_action(sid, actor.id, "pedo", target.id, msg.reply_to_message.message_id)
+    run_bg(context, log_trusted_action(sid, actor.id, "pedo", target.id, msg.reply_to_message.message_id), 'log_trusted_action')
     await ban_hashes_from_user_session(target.id)
-    await delete_user_session_messages(context,target.id)
+    run_bg(context, delete_user_session_messages(context,target.id), 'delete_user_session_messages')
     try:
         await context.bot.ban_chat_member(GROUP_ID,target.id)
         await increment_ban_count(); await increment_session_counter("session_exclusions")
@@ -2637,7 +2653,7 @@ async def trusted_pasfr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await delete_message_safe(context,msg.chat_id,msg.message_id)
     try: await increment_session_counter("session_deletions")
     except Exception: pass
-    try: await log_trusted_action(await get_session_for_trusted(), actor.id, "pasfr", target.id, msg.reply_to_message.message_id)
+    try: run_bg(context, log_trusted_action(await get_session_for_trusted(), 'log_trusted_action'), actor.id, "pasfr", target.id, msg.reply_to_message.message_id)
     except Exception as e: print(f"PASFR LOG ERROR: {e}", flush=True)
     await send_public_warning(context, GROUP_ID, "⚠️ Merci d’envoyer uniquement du contenu FR.", seconds=180)
 
@@ -2992,6 +3008,9 @@ async def send_participation_required_warning(context, user):
         print(f"PARTICIPATION WARNING SEND ERROR user={getattr(user, 'id', None)}: {e}", flush=True)
         return None
 
+
+def fast_priority_hash_ban_marker():
+    print('FAST PRIORITY HASH BAN marker active', flush=True)
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_chat.id != GROUP_ID:

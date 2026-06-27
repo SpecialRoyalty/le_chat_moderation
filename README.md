@@ -565,3 +565,26 @@ Correction :
 - logs Railway :
   - `PARTICIPATION REQUIRED TRIGGERED`
   - `PARTICIPATION WARNING SENT`
+
+
+## FINAL_COMPLETE_V62_FAST_TRUSTED_PRIORITY
+
+Objectif :
+- commandes trusted prioritaires et quasi instantanées ;
+- hash-ban média immédiat ;
+- tâches lourdes en arrière-plan.
+
+Modifications :
+- ajout `run_bg()` / `bg_task_safe()`;
+- purges longues et logs de trusted en background;
+- `/ban` garde le ban immédiat, purge ensuite;
+- `/pedo` garde le ban immédiat, hash/purge ensuite si lourd;
+- `/supprime` et `/pasfr` gardent la suppression ciblée immédiate;
+- log hash-ban ajouté : `FAST PRIORITY HASH BAN`;
+- protection target super trusted homogénéisée via `is_protected_user`.
+
+Fonctions patchées automatiquement :
+- trusted_supprime
+- trusted_ban
+- trusted_pedo
+- trusted_pasfr

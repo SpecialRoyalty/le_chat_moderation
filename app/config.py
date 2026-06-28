@@ -1,0 +1,72 @@
+from __future__ import annotations
+from functools import lru_cache
+from typing import Optional, List
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
+    bot_token: str = Field(alias='BOT_TOKEN')
+    database_url: str = Field(alias='DATABASE_URL')
+    admin_ids: List[int] = Field(default_factory=list, alias='ADMIN_IDS')
+    trusted_ids: List[int] = Field(default_factory=list, alias='TRUSTED_IDS')
+    main_group_id: int = Field(alias='MAIN_GROUP_ID')
+    log_group_id: Optional[int] = Field(default=None, alias='LOG_GROUP_ID')
+    public_bot_username: str = Field(default='', alias='PUBLIC_BOT_USERNAME')
+    timezone: str = Field(default='Europe/Paris', alias='TIMEZONE')
+    default_vote_goal: int = Field(default=120, alias='DEFAULT_VOTE_GOAL')
+    default_time_slot: str = Field(default='22:30-00:45', alias='DEFAULT_TIME_SLOT')
+    auto_schedule_enabled: bool = Field(default=True, alias='AUTO_SCHEDULE_ENABLED')
+
+    @field_validator('database_url', mode='before')
+    @classmethod
+    def fix_db_url(cls, v):
+        if isinstance(v, str):
+            if v.startswith('postgres://'):
+                v = 'postgresql://' + v[len('postgres://'):]
+            if v.startswith('postgresql://'):
+                v = 'postgresql+asyncpg://' + v[len('postgresql://'):]
+            v = cls._with_test_database_name(v)
+        return v
+
+    @staticmethod
+    def _with_test_database_name(url: str) -> str:
+        # Force l'environnement de test : le nom de la base finit par _test.
+        # PostgreSQL : postgresql+asyncpg://user:pass@host:port/dbname[?params]
+        if url.startswith(('postgresql+asyncpg://','postgresql://')):
+            qpos = url.find('?')
+            base = url if qpos == -1 else url[:qpos]
+            query = '' if qpos == -1 else url[qpos:]
+            slash = base.rfind('/')
+            if slash != -1 and slash < len(base) - 1:
+                dbname = base[slash+1:]
+                if not dbname.endswith('_test'):
+                    base = base[:slash+1] + dbname + '_test'
+            return base + query
+        # SQLite : suffixe le fichier .db si présent.
+        if url.startswith('sqlite') and url.endswith('.db') and not url.endswith('_test.db'):
+            return url[:-3] + '_test.db'
+        return url
+
+    @field_validator('admin_ids','trusted_ids', mode='before')
+    @classmethod
+    def parse_ids(cls, v):
+        if v is None or v == '': return []
+        if isinstance(v, list): return [int(x) for x in v]
+        if isinstance(v, int): return [v]
+        if isinstance(v, str): return [int(x.strip()) for x in v.split(',') if x.strip()]
+        return []
+
+    @field_validator('log_group_id', mode='before')
+    @classmethod
+    def empty_int(cls, v):
+        if v is None or v == '': return None
+        return int(v)
+
+    @property
+    def all_admin_ids(self) -> set[int]:
+        return set(self.admin_ids) | set(self.trusted_ids)
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()  # type: ignore

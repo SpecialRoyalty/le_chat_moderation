@@ -1,4 +1,0 @@
-python-telegram-bot[webhooks,job-queue]==21.6
-asyncpg==0.29.0
-Pillow==10.4.0
-opencv-python-headless==4.10.0.84

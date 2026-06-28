@@ -1,15 +1,15 @@
 from __future__ import annotations
 from functools import lru_cache
-from typing import Optional, List
+from typing import Optional, List, Annotated
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict, NoDecode
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
     bot_token: str = Field(alias='BOT_TOKEN')
     database_url: str = Field(alias='DATABASE_URL')
-    admin_ids: List[int] = Field(default_factory=list, alias='ADMIN_IDS')
-    trusted_ids: List[int] = Field(default_factory=list, alias='TRUSTED_IDS')
+    admin_ids: Annotated[List[int], NoDecode] = Field(default_factory=list, alias='ADMIN_IDS')
+    trusted_ids: Annotated[List[int], NoDecode] = Field(default_factory=list, alias='TRUSTED_IDS')
     main_group_id: int = Field(alias='MAIN_GROUP_ID')
     log_group_id: Optional[int] = Field(default=None, alias='LOG_GROUP_ID')
     public_bot_username: str = Field(default='', alias='PUBLIC_BOT_USERNAME')

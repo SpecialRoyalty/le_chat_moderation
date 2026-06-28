@@ -1,6 +1,6 @@
 from aiogram import Router, Bot, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from sqlalchemy import select
 from app.config import get_settings
 from app.keyboards.common import admin_kb, goal_kb, settings_kb, justice_kb, cleanup_kb, mod_kb, ads_admin_kb, confirm_kb, back_kb, rules_admin_kb, hashban_kb, top_admin_kb, invite_admin_kb
@@ -18,7 +18,7 @@ from aiogram.exceptions import TelegramBadRequest
 from app.services.hashban import ban_hash_from_message, banned_hash_count
 router=Router()
 
-def is_admin(uid:int): return uid in get_settings().admin_ids
+def is_admin(uid:int): return uid in get_settings().all_admin_ids
 
 async def justice_settings_text():
     limit = await st.justice_limit()
@@ -43,6 +43,7 @@ async def get_admin_state(uid:int): return await st.get_value(f'admin_state:{uid
 async def clear_admin_state(uid:int): await st.set_value(f'admin_state:{uid}','')
 
 @router.message(CommandStart())
+@router.message(Command("admin"))
 async def start(msg:Message, bot:Bot):
     arg=''
     if msg.text and len(msg.text.split(maxsplit=1))>1:

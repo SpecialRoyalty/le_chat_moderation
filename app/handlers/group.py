@@ -1,4 +1,4 @@
-from aiogram import Router, Bot
+from aiogram import Router, Bot, F
 from aiogram.types import Message, ChatMemberUpdated
 from app.config import get_settings
 from app.services.users import upsert_user
@@ -28,6 +28,25 @@ async def bot_added(event:ChatMemberUpdated, bot:Bot):
 @router.chat_member()
 async def member_update(event:ChatMemberUpdated, bot:Bot):
     await on_join(event, bot)
+
+@router.message(F.new_chat_members | F.left_chat_member)
+async def delete_service_join_leave(msg:Message, bot:Bot):
+    """Supprime immédiatement les notifications Telegram d’entrée/sortie du groupe principal.
+
+    Exception volontaire : pendant la justice populaire, on garde les notifications
+    de sortie afin que les suppressions restent visibles puis traçables/nettoyables.
+    """
+    s = get_settings()
+    if msg.chat.id != s.main_group_id:
+        return
+    keep_removed = bool(msg.left_chat_member and await st.get_value('justice_running','false') == 'true')
+    if keep_removed:
+        await track(msg.chat.id, msg.message_id, getattr(msg.left_chat_member, 'id', None), 'justice_removed_notification', False)
+        return
+    try:
+        await bot.delete_message(msg.chat.id, msg.message_id)
+    except Exception:
+        pass
 
 @router.message()
 async def all_messages(msg:Message, bot:Bot):

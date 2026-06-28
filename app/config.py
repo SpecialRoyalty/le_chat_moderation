@@ -1,15 +1,17 @@
 from __future__ import annotations
 from functools import lru_cache
-from typing import Optional, List, Annotated
+from typing import Optional
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict, NoDecode
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
     bot_token: str = Field(alias='BOT_TOKEN')
     database_url: str = Field(alias='DATABASE_URL')
-    admin_ids: Annotated[List[int], NoDecode] = Field(default_factory=list, alias='ADMIN_IDS')
-    trusted_ids: Annotated[List[int], NoDecode] = Field(default_factory=list, alias='TRUSTED_IDS')
+    # String fields to avoid pydantic-settings JSON decoding errors on Railway.
+    # Accepted values: empty, comma-separated ('123,456'), JSON-like ('[123,456]').
+    admin_ids: str = Field(default='', alias='ADMIN_IDS')
+    trusted_ids: str = Field(default='', alias='TRUSTED_IDS')
     main_group_id: int = Field(alias='MAIN_GROUP_ID')
     log_group_id: Optional[int] = Field(default=None, alias='LOG_GROUP_ID')
     public_bot_username: str = Field(default='', alias='PUBLIC_BOT_USERNAME')
@@ -48,13 +50,21 @@ class Settings(BaseSettings):
             return url[:-3] + '_test.db'
         return url
 
-    @field_validator('admin_ids','trusted_ids', mode='before')
-    @classmethod
-    def parse_ids(cls, v):
-        if v is None or v == '': return []
-        if isinstance(v, list): return [int(x) for x in v]
-        if isinstance(v, int): return [v]
-        if isinstance(v, str): return [int(x.strip()) for x in v.split(',') if x.strip()]
+    @staticmethod
+    def _parse_ids(v) -> list[int]:
+        if v is None:
+            return []
+        if isinstance(v, int):
+            return [v]
+        if isinstance(v, list):
+            return [int(x) for x in v if str(x).strip()]
+        if isinstance(v, str):
+            raw = v.strip()
+            if not raw:
+                return []
+            if raw.startswith('[') and raw.endswith(']'):
+                raw = raw[1:-1]
+            return [int(x.strip().strip('\"\'')) for x in raw.split(',') if x.strip().strip('\"\'')]
         return []
 
     @field_validator('log_group_id', mode='before')
@@ -65,7 +75,7 @@ class Settings(BaseSettings):
 
     @property
     def all_admin_ids(self) -> set[int]:
-        return set(self.admin_ids) | set(self.trusted_ids)
+        return set(self._parse_ids(self.admin_ids)) | set(self._parse_ids(self.trusted_ids))
 
 @lru_cache
 def get_settings() -> Settings:

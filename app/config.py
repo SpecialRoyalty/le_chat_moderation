@@ -28,27 +28,7 @@ class Settings(BaseSettings):
                 v = 'postgresql://' + v[len('postgres://'):]
             if v.startswith('postgresql://'):
                 v = 'postgresql+asyncpg://' + v[len('postgresql://'):]
-            v = cls._with_test_database_name(v)
         return v
-
-    @staticmethod
-    def _with_test_database_name(url: str) -> str:
-        # Force l'environnement de test : le nom de la base finit par _test.
-        # PostgreSQL : postgresql+asyncpg://user:pass@host:port/dbname[?params]
-        if url.startswith(('postgresql+asyncpg://','postgresql://')):
-            qpos = url.find('?')
-            base = url if qpos == -1 else url[:qpos]
-            query = '' if qpos == -1 else url[qpos:]
-            slash = base.rfind('/')
-            if slash != -1 and slash < len(base) - 1:
-                dbname = base[slash+1:]
-                if not dbname.endswith('_test'):
-                    base = base[:slash+1] + dbname + '_test'
-            return base + query
-        # SQLite : suffixe le fichier .db si présent.
-        if url.startswith('sqlite') and url.endswith('.db') and not url.endswith('_test.db'):
-            return url[:-3] + '_test.db'
-        return url
 
     @staticmethod
     def _parse_ids(v) -> list[int]:

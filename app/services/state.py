@@ -1,5 +1,6 @@
 import logging
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from app.config import get_settings
@@ -24,10 +25,19 @@ async def vote_count(chat_id:int):
 
 async def add_vote(chat_id:int,user_id:int):
     s=get_settings()
+    dk=day_key(s.timezone)
     async with SessionLocal() as db:
-        exists=await db.execute(select(Vote).where(Vote.chat_id==chat_id,Vote.user_id==user_id,Vote.day_key==day_key(s.timezone)))
-        if exists.scalar_one_or_none(): return False
-        db.add(Vote(chat_id=chat_id,user_id=user_id,day_key=day_key(s.timezone))); await db.commit(); return True
+        exists=await db.execute(select(Vote).where(Vote.chat_id==chat_id,Vote.user_id==user_id,Vote.day_key==dk))
+        if exists.scalar_one_or_none():
+            return False
+        db.add(Vote(chat_id=chat_id,user_id=user_id,day_key=dk))
+        try:
+            await db.commit()
+            return True
+        except IntegrityError:
+            # Double clic ou callback Telegram rejoué : le vote existe déjà.
+            await db.rollback()
+            return False
 
 async def status_text(chat_id:int):
     goal=await st.vote_goal(); votes=await vote_count(chat_id); slot=await st.time_slot(); s=get_settings()

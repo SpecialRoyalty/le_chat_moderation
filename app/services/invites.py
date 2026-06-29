@@ -53,8 +53,8 @@ async def invite_kb():
     username=get_settings().public_bot_username.strip().lstrip('@')
     url=f'https://t.me/{username}?start=invite' if username else None
     if url:
-        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🎁 Recevoir vidéos', url=url)]])
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🎁 Recevoir vidéos', callback_data='invite_private')]])
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔗 Recevoir mon lien', url=url)]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔗 Recevoir mon lien', callback_data='invite_private')]])
 
 async def send_invite_ad(bot:Bot, force:bool=False):
     if not force and not await st.is_open(): return None

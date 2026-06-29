@@ -54,8 +54,16 @@ class Settings(BaseSettings):
         return int(v)
 
     @property
+    def admin_id_set(self) -> set[int]:
+        return set(self._parse_ids(self.admin_ids))
+
+    @property
+    def trusted_id_set(self) -> set[int]:
+        return set(self._parse_ids(self.trusted_ids))
+
+    @property
     def all_admin_ids(self) -> set[int]:
-        return set(self._parse_ids(self.admin_ids)) | set(self._parse_ids(self.trusted_ids))
+        return self.admin_id_set | self.trusted_id_set
 
 @lru_cache
 def get_settings() -> Settings:

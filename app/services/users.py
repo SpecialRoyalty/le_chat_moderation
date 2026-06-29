@@ -30,7 +30,7 @@ async def upsert_user(tgu:TgUser):
             u=User(id=tgu.id, username=tgu.username, full_name=tgu.full_name or '', suspect_score=score)
             db.add(u)
         u.username=tgu.username; u.full_name=tgu.full_name or ''; u.last_seen=datetime.utcnow()
-        u.is_admin=tgu.id in s.admin_ids; u.is_trusted=(tgu.id in s.trusted_ids or tgu.id in s.admin_ids)
+        u.is_admin=tgu.id in s.admin_id_set; u.is_trusted=(tgu.id in s.trusted_id_set or tgu.id in s.admin_id_set)
         await db.commit(); return u
 async def protected(user_id:int):
     s=get_settings(); return user_id in s.all_admin_ids

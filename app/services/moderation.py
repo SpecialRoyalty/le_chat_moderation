@@ -86,7 +86,7 @@ async def moderate_message(bot:Bot,msg:Message):
     await track(msg.chat.id,msg.message_id,msg.from_user.id,'message',is_media(msg))
     if msg.chat.id != get_settings().main_group_id: return
     uid=msg.from_user.id; text=msg.text or msg.caption or ''
-    trusted=uid in get_settings().trusted_ids; admin=uid in get_settings().admin_ids
+    trusted=uid in get_settings().trusted_id_set; admin=uid in get_settings().admin_id_set
     if not await st.is_open() and not (trusted or admin):
         await delete(bot,msg); return
     if is_media(msg):

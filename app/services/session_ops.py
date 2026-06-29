@@ -73,7 +73,7 @@ async def cleanup_session(bot:Bot, all_known:bool=False):
     return deleted, failed
 
 async def notify_admins(bot:Bot,text:str, reply_markup=None):
-    for aid in get_settings().admin_ids:
+    for aid in get_settings().admin_id_set:
         try: await bot.send_message(aid,text,reply_markup=reply_markup)
         except Exception: pass
 

@@ -37,7 +37,7 @@ def _candidate_filter(sid:int):
 async def _protected_ids() -> set[int]:
     s=get_settings()
     bot_id = int(await st.get_value('bot_id','0') or '0')
-    protected_ids = set(s.admin_ids) | set(s.trusted_ids)
+    protected_ids = set(s.admin_id_set) | set(s.trusted_id_set)
     if bot_id:
         protected_ids.add(bot_id)
     return protected_ids

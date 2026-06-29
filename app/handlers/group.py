@@ -17,7 +17,7 @@ async def bot_added(event:ChatMemberUpdated, bot:Bot):
     if s.log_group_id:
         allowed.append(s.log_group_id)
     if event.chat.id not in allowed:
-        for aid in s.admin_ids:
+        for aid in s.admin_id_set:
             try: await bot.send_message(aid,f'🚨 Tentative de raccordement pirate\nGroupe: {event.chat.title} ({event.chat.id})')
             except Exception: pass
         try: await bot.send_message(event.chat.id,'Tentative de raccordement pirate détectée 😭')

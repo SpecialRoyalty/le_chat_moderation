@@ -6,7 +6,7 @@ from app.config import get_settings
 from app.keyboards.common import admin_kb, goal_kb, settings_kb, justice_kb, cleanup_kb, mod_kb, ads_admin_kb, confirm_kb, back_kb, rules_admin_kb, hashban_kb, top_admin_kb, invite_admin_kb
 from app.services import settings as st
 from app.services.session_ops import set_group_open, cleanup_session, count_known_bans_and_restrictions, presidential_pardon, ministerial_pardon
-from app.services.state import ensure_status_message
+from app.services.state import ensure_status_message, track, log_error
 from app.services.health import health_text
 from app.services.invites import top_text, send_invite_ad, invite_health_text, tiers_text, set_tiers_from_text, send_invite_private
 from app.services.ads import add_ad, send_random_ad, list_ads_text, ads_health_text, ads_list_kb, ad_detail, toggle_ad, delete_ad, set_ad_text, set_ad_image, send_ad_by_id
@@ -78,6 +78,9 @@ async def admin_cb(cb:CallbackQuery, bot:Bot):
     elif d=='adm_ads':
         enabled=(await st.get_value('ads_enabled','true'))=='true'
         await cb.message.answer(f'📢 Publicités\n\nDiffusion automatique : {"ON" if enabled else "OFF"}',reply_markup=ads_admin_kb())
+    elif d=='adm_broadcast':
+        await set_admin_state(cb.from_user.id, 'broadcast_group')
+        await cb.message.answer('📣 Broadcast groupe\n\nEnvoie maintenant en privé le message à publier dans le groupe.\nTexte, photo, vidéo, document ou média avec légende : le bot le copiera tel quel dans le groupe.')
     elif d=='adm_invites': await cb.message.answer('🎁 Invitations\n\nTexte + image + bouton Recevoir vidéos. Validation après 5 min, paliers GoFile, compteurs total/récompense.',reply_markup=invite_admin_kb())
     elif d=='adm_top': await cb.message.answer(await top_text(), reply_markup=top_admin_kb())
     elif d=='adm_mod': await cb.message.answer('🛡️ Modération\nAjoute les mots via boutons, sans commandes.',reply_markup=mod_kb())
@@ -121,6 +124,7 @@ async def await_input(cb:CallbackQuery):
         'invite_text':'Envoie le texte du message invitations.',
         'invite_image':'Envoie l’image du message invitations.',
         'invite_tiers':'Envoie les paliers, une ligne par palier : 1|Label|Lien GoFile',
+        'broadcast_group':'Envoie le message à publier dans le groupe.',
     }
     await cb.message.answer('✍️ '+prompts.get(state,'Envoie la valeur.'))
     await cb.answer()
@@ -294,6 +298,20 @@ async def admin_text_state(msg:Message, bot:Bot):
             adid=await add_ad(text=msg.caption or '',image_file_id=msg.photo[-1].file_id)
             await msg.answer('✅ Publicité image ajoutée.' if adid!=-1 else 'Maximum 2 publicités configurées. Supprime une pub avant d’en ajouter une autre.',reply_markup=ads_admin_kb())
         else: await msg.answer('Envoie une image.') ; return
+    elif state=='broadcast_group':
+        try:
+            copied = await bot.copy_message(
+                chat_id=get_settings().main_group_id,
+                from_chat_id=msg.chat.id,
+                message_id=msg.message_id,
+            )
+            mid = getattr(copied, 'message_id', None)
+            if mid:
+                await track(get_settings().main_group_id, mid, None, 'broadcast', bool(msg.photo or msg.video or msg.document or msg.animation or msg.audio or msg.voice or msg.video_note))
+            await msg.answer('✅ Broadcast publié dans le groupe.', reply_markup=admin_kb())
+        except Exception as e:
+            await log_error('broadcast_group', e)
+            await msg.answer(f'❌ Broadcast impossible : {e}', reply_markup=admin_kb())
     elif state=='invite_text':
         await st.set_value('invite_text', msg.text or '')
         await msg.answer('✅ Texte invitations sauvegardé.', reply_markup=invite_admin_kb())

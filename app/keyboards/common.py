@@ -10,7 +10,7 @@ def admin_kb():
         [('⏰ Auto ON/OFF','adm_auto'),('📦 Objectif','adm_goal')],
         [('⚖️ Justice','adm_justice'),('🧹 Nettoyage','adm_cleanup')],
         [('🕵️ Suspects','adm_suspects'),('🔁 Repost ON/OFF','adm_repost')],
-        [('📢 Publicités','adm_ads')],
+        [('📢 Publicités','adm_ads'),('📣 Broadcast groupe','adm_broadcast')],
         [('🎁 Invitations','adm_invites'),('🏆 Top inviteurs','adm_top')],
         [('🛡️ Modération','adm_mod'),('📜 Règles','adm_rules')],
         [('🚫 Hash ban','adm_hashban')],

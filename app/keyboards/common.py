@@ -8,13 +8,12 @@ def admin_kb():
         [('📊 Tableau de bord','adm_dashboard'),('🟢 Santé','adm_health')],
         [('🔓 Ouvrir','adm_open'),('🔒 Fermer','adm_close')],
         [('⏰ Auto ON/OFF','adm_auto'),('📦 Objectif','adm_goal')],
-        [('⚖️ Justice','adm_justice'),('🧹 Nettoyage','adm_cleanup')],
-        [('🕵️ Suspects','adm_suspects'),('🔁 Repost ON/OFF','adm_repost')],
-        [('📢 Publicités','adm_ads'),('📣 Broadcast groupe','adm_broadcast')],
+        [('🧹 Nettoyage','adm_cleanup'),('🕵️ Suspects','adm_suspects')],
+        [('🔁 Repost ON/OFF','adm_repost'),('📢 Publicités','adm_ads')],
+        [('📣 Broadcast groupe','adm_broadcast')],
         [('🎁 Invitations','adm_invites'),('🏆 Top inviteurs','adm_top')],
         [('🛡️ Modération','adm_mod'),('📜 Règles','adm_rules')],
         [('🚫 Hash ban','adm_hashban')],
-        [('👑 Grâce prés.','adm_pardon_ban'),('⚖️ Grâce min.','adm_pardon_mute')],
         [('📊 Rapports','adm_reports'),('⚙️ Paramètres','adm_settings')],
     ]
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t,callback_data=c) for t,c in r] for r in rows])
@@ -34,17 +33,9 @@ def settings_kb():
         [InlineKeyboardButton(text='22h30 → 00h45',callback_data='slot_set:22:30-00:45')],
         [InlineKeyboardButton(text='22h00 → 00h00',callback_data='slot_set:22:00-00:00')],
         [InlineKeyboardButton(text='23h00 → 01h00',callback_data='slot_set:23:00-01:00')],
-        [InlineKeyboardButton(text='⚖️ Limite justice populaire',callback_data='settings_justice')],
         [InlineKeyboardButton(text='⬅️ Retour',callback_data='adm_dashboard')]
     ])
 
-def justice_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='⚖️ Lancer justice maintenant',callback_data='justice_run')],
-        [InlineKeyboardButton(text='📊 Statut justice',callback_data='justice_status')],
-        [InlineKeyboardButton(text='🔍 Prévisualiser justice',callback_data='justice_preview')],
-        [InlineKeyboardButton(text='⬅️ Retour',callback_data='adm_dashboard')]
-    ])
 
 def cleanup_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -90,11 +81,6 @@ def top_admin_kb():
         [InlineKeyboardButton(text='📤 Publier classement maintenant', callback_data='top_send')],
         [InlineKeyboardButton(text='🩺 Vérifier top inviteurs', callback_data='top_health')],
         [InlineKeyboardButton(text='⬅️ Retour', callback_data='adm_dashboard')]
-    ])
-
-def confirm_kb(action:str):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='✅ Confirmer', callback_data=f'confirm:{action}'), InlineKeyboardButton(text='❌ Annuler', callback_data='adm_dashboard')]
     ])
 
 

@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from app.config import get_settings
@@ -22,10 +22,6 @@ async def set_group_open(bot:Bot, open_:bool, kind='auto'):
         async with SessionLocal() as db:
             sess=SessionLog(chat_id=s.main_group_id,kind=kind,status='open'); db.add(sess); await db.flush()
             await st.set_value('active_session_id',str(sess.id))
-            # Justice/inactivité : une ouverture accessible compte comme une session
-            # pour les membres connus, sauf admins/trusted/bannis. Telegram ne permet pas
-            # de lister tous les membres, donc on suit les profils déjà connus par le bot.
-            await db.execute(update(User).where(User.is_admin==False, User.is_trusted==False, User.is_banned==False).values(sessions_present=User.sessions_present+1))
             await db.commit()
         await st.set_open(True)
         await st.set_value('manual_opened_at', datetime.utcnow().isoformat() if kind=='manual' else '')
@@ -120,34 +116,3 @@ async def security_close_if_manual(bot:Bot):
     if datetime.utcnow()-wdt >= timedelta(minutes=5):
         await set_group_open(bot,False,'security')
 
-async def count_known_bans_and_restrictions():
-    async with SessionLocal() as db:
-        banned=(await db.execute(select(func.count(User.id)).where(User.is_banned==True))).scalar() or 0
-        restricted=(await db.execute(select(func.count(User.id)).where(User.is_restricted==True))).scalar() or 0
-        return int(banned), int(restricted)
-
-async def presidential_pardon(bot:Bot):
-    async with SessionLocal() as db:
-        res=await db.execute(select(User).where(User.is_banned==True))
-        users=list(res.scalars().all()); count=len(users)
-        for u in users:
-            try: await bot.unban_chat_member(get_settings().main_group_id,u.id,only_if_banned=True)
-            except Exception as e: await log_error('unban',e)
-            u.is_banned=False
-        await db.commit()
-    if await st.is_open():
-        await bot.send_message(get_settings().main_group_id,f'👑 GRÂCE PRÉSIDENTIELLE\n\n{count} bannissement(s) levé(s).\n\nNe confondez pas pardon et oubli.')
-    return count
-
-async def ministerial_pardon(bot:Bot):
-    async with SessionLocal() as db:
-        res=await db.execute(select(User).where(User.is_restricted==True))
-        users=list(res.scalars().all()); count=len(users)
-        for u in users:
-            try: await bot.restrict_chat_member(get_settings().main_group_id,u.id,permissions=OPEN_PERMS)
-            except Exception as e: await log_error('unrestrict',e)
-            u.is_restricted=False
-        await db.commit()
-    if await st.is_open():
-        await bot.send_message(get_settings().main_group_id,f'⚖️ GRÂCE MINISTÉRIELLE\n\n{count} restriction(s) levée(s).\n\nLa prochaine faute comptera double.')
-    return count

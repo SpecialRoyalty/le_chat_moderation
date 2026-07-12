@@ -15,7 +15,7 @@ async def set_value(key:str, value:str):
         await db.commit()
 async def init_defaults():
     s=get_settings()
-    defaults={'auto_enabled':str(s.auto_schedule_enabled).lower(),'time_slot':s.default_time_slot,'vote_goal':str(s.default_vote_goal),'group_open':'false','status_message_id':'','active_session_id':'0','rules_text':'Respectez les règles. Pas de liens, pas de mentions, pas de commandes.','ads_text':'📢 Publicité','ads_enabled':'true','repost_enabled':'false','last_repost_blocked_at':'jamais','last_repost_blocked_user':'','weekly_top_started':'false','weekly_top_start':'','manual_security_warned_at':'','manual_opened_at':'','justice_limit':'20'}
+    defaults={'auto_enabled':str(s.auto_schedule_enabled).lower(),'time_slot':s.default_time_slot,'vote_goal':str(s.default_vote_goal),'group_open':'false','status_message_id':'','active_session_id':'0','rules_text':'Respectez les règles. Pas de liens, pas de mentions, pas de commandes.','ads_text':'📢 Publicité','ads_enabled':'true','repost_enabled':'false','last_repost_blocked_at':'jamais','last_repost_blocked_user':'','weekly_top_started':'false','weekly_top_start':'','manual_security_warned_at':'','manual_opened_at':''}
     for k,v in defaults.items():
         if await get_value(k,'')=='': await set_value(k,v)
 async def is_open(): return (await get_value('group_open','false'))=='true'
@@ -24,10 +24,3 @@ async def auto_enabled(): return (await get_value('auto_enabled','true'))=='true
 async def time_slot(): return await get_value('time_slot', get_settings().default_time_slot)
 async def vote_goal(): return int(await get_value('vote_goal', str(get_settings().default_vote_goal)))
 
-async def justice_limit():
-    raw = await get_value('justice_limit','20')
-    try:
-        n = int(raw)
-    except Exception:
-        n = 20
-    return max(1, min(n, 200))

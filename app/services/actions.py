@@ -76,18 +76,18 @@ async def trusted_command(bot: Bot, msg: Message):
 
         await ban(bot, msg.chat.id, uid)
 
-        # Bannit fortement le média ciblé : file_unique_id + sha256
+        # Bannissement robuste du média ciblé : file_unique_id + SHA-256.
         await ban_hash_from_message(target, bot)
 
         async with SessionLocal() as db:
-            # Bannit tous les médias déjà connus de cet utilisateur
+            # Tous les médias déjà connus de cet utilisateur deviennent interdits.
             await db.execute(
                 update(MediaHash)
                 .where(MediaHash.user_id == uid)
                 .values(banned=True)
             )
 
-            # Supprime tous ses messages suivis
+            # Suppression de tous ses messages suivis dans le groupe.
             res = await db.execute(
                 select(TrackedMessage).where(
                     TrackedMessage.chat_id == msg.chat.id,

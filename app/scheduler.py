@@ -6,7 +6,7 @@ from app.services.state import ensure_status_message, vote_count
 from app.services.session_ops import set_group_open, security_close_if_manual
 from app.services.ads import send_random_ad
 from app.services.invites import validate_invites, top_text, send_invite_ad
-from app.utils.time import in_slot, mid_time, now_tz
+from app.utils.time import in_slot
 
 async def tick(bot:Bot):
     s=get_settings(); chat=s.main_group_id
@@ -20,19 +20,6 @@ async def tick(bot:Bot):
         await set_group_open(bot,True,'auto')
     if not ins and open_:
         await set_group_open(bot,False,'auto')
-async def run_justice_now(bot:Bot):
-    if not await st.is_open(): return
-    from app.services.justice import execute_justice
-    await execute_justice(bot, manual=False)
-
-async def justice_tick(bot:Bot):
-    if not await st.is_open(): return
-    s=get_settings(); mt=mid_time(await st.time_slot(),s.timezone); n=now_tz(s.timezone)
-    done=await st.get_value('justice_done_'+n.strftime('%Y%m%d'),'false')
-    if done=='true': return
-    if abs((n-mt).total_seconds())<70:
-        await st.set_value('justice_done_'+n.strftime('%Y%m%d'),'true')
-        await run_justice_now(bot)
 async def rules_tick(bot:Bot, force:bool=False):
     if not force and not await st.is_open(): return
     s=get_settings(); old=await st.get_value('rules_message_id','')
@@ -53,7 +40,6 @@ async def top_tick(bot:Bot):
 def start_scheduler(bot:Bot):
     sch=AsyncIOScheduler(timezone=get_settings().timezone)
     sch.add_job(tick,'interval',minutes=1,args=[bot], id='tick')
-    sch.add_job(justice_tick,'interval',minutes=1,args=[bot], id='justice')
     sch.add_job(validate_invites,'interval',minutes=1,args=[bot], id='invite_validate')
     sch.add_job(rules_tick,'interval',minutes=30,args=[bot], id='rules')
     sch.add_job(send_random_ad,'cron',hour='22,0',minute='45,5',args=[bot], id='random_ads')

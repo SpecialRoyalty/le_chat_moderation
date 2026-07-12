@@ -3,41 +3,20 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import CommandStart, Command
 from sqlalchemy import select
 from app.config import get_settings
-from app.keyboards.common import admin_kb, goal_kb, settings_kb, justice_kb, cleanup_kb, mod_kb, ads_admin_kb, confirm_kb, back_kb, rules_admin_kb, hashban_kb, top_admin_kb, invite_admin_kb
+from app.keyboards.common import admin_kb, goal_kb, settings_kb, cleanup_kb, mod_kb, ads_admin_kb, back_kb, rules_admin_kb, hashban_kb, top_admin_kb, invite_admin_kb
 from app.services import settings as st
-from app.services.session_ops import set_group_open, cleanup_session, count_known_bans_and_restrictions, presidential_pardon, ministerial_pardon
+from app.services.session_ops import set_group_open, cleanup_session
 from app.services.state import ensure_status_message, track, log_error
 from app.services.health import health_text
 from app.services.invites import top_text, send_invite_ad, invite_health_text, tiers_text, set_tiers_from_text, send_invite_private
 from app.services.ads import add_ad, send_random_ad, list_ads_text, ads_health_text, ads_list_kb, ad_detail, toggle_ad, delete_ad, set_ad_text, set_ad_image, send_ad_by_id
 from app.db.session import SessionLocal
 from app.db.models import WordRule
-from app.services.justice import justice_preview_text, execute_justice, candidate_count
-import asyncio
-from aiogram.exceptions import TelegramBadRequest
 from app.services.hashban import ban_hash_from_message, banned_hash_count
 router=Router()
 
 def is_admin(uid:int): return uid in get_settings().all_admin_ids
 
-async def justice_settings_text():
-    limit = await st.justice_limit()
-    total = await candidate_count()
-    return f'''⚖️ Justice populaire
-
-Limite :
-{limit} personnes / session
-
-Justifiables actuels : {total}
-
-Si plus de membres sont éligibles, seuls les {limit} plus prioritaires seront supprimés. Les autres seront reportés aux prochaines sessions.'''
-
-def justice_settings_kb(limit:int):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='−10', callback_data='justice_limit_delta:-10'), InlineKeyboardButton(text='−1', callback_data='justice_limit_delta:-1'), InlineKeyboardButton(text=f'{limit}', callback_data='noop'), InlineKeyboardButton(text='+1', callback_data='justice_limit_delta:1'), InlineKeyboardButton(text='+10', callback_data='justice_limit_delta:10')],
-        [InlineKeyboardButton(text='10', callback_data='justice_limit_set:10'), InlineKeyboardButton(text='20', callback_data='justice_limit_set:20'), InlineKeyboardButton(text='30', callback_data='justice_limit_set:30'), InlineKeyboardButton(text='50', callback_data='justice_limit_set:50')],
-        [InlineKeyboardButton(text='⬅️ Retour paramètres', callback_data='adm_settings')]
-    ])
 async def set_admin_state(uid:int,state:str): await st.set_value(f'admin_state:{uid}',state)
 async def get_admin_state(uid:int): return await st.get_value(f'admin_state:{uid}','')
 async def clear_admin_state(uid:int): await st.set_value(f'admin_state:{uid}','')
@@ -68,7 +47,6 @@ async def admin_cb(cb:CallbackQuery, bot:Bot):
     elif d=='adm_auto':
         cur=await st.auto_enabled(); await st.set_value('auto_enabled','false' if cur else 'true'); await ensure_status_message(bot,get_settings().main_group_id); await cb.message.answer(f'⏰ Horaire auto : {"OFF" if cur else "ON"}',reply_markup=admin_kb())
     elif d=='adm_goal': await cb.message.answer(f'📦 Objectif actuel : {await st.vote_goal()}\nChoisis un objectif ou personnalisé.',reply_markup=goal_kb())
-    elif d=='adm_justice': await cb.message.answer('⚖️ Justice populaire\n\nAutomatique : 50% de la session.\nTest manuel disponible avec prévisualisation.',reply_markup=justice_kb())
     elif d=='adm_cleanup': await cb.message.answer('🧹 Nettoyage\n\nSi les médias ne se suppriment pas, vérifie que le bot est admin avec droit de suppression.',reply_markup=cleanup_kb())
     elif d=='adm_suspects': await cb.message.answer('🕵️ Comptes suspects\n\nScore 50+ visible admin\n80+ invitation en attente\n100+ rejetée\n\nBoutons de suppression par score à ajouter après volume réel.',reply_markup=back_kb())
     elif d=='adm_repost':
@@ -85,13 +63,9 @@ async def admin_cb(cb:CallbackQuery, bot:Bot):
     elif d=='adm_top': await cb.message.answer(await top_text(), reply_markup=top_admin_kb())
     elif d=='adm_mod': await cb.message.answer('🛡️ Modération\nAjoute les mots via boutons, sans commandes.',reply_markup=mod_kb())
     elif d=='adm_rules': await cb.message.answer('📜 Règles\n\nTu peux publier maintenant ou modifier le texte.',reply_markup=rules_admin_kb())
-    elif d=='adm_pardon_ban':
-        b,r=await count_known_bans_and_restrictions(); await cb.message.answer(f'👑 Grâce présidentielle\n\nBannis connus concernés : {b}\n\nConfirmer le déban massif ?',reply_markup=confirm_kb('pardon_ban'))
-    elif d=='adm_pardon_mute':
-        b,r=await count_known_bans_and_restrictions(); await cb.message.answer(f'⚖️ Grâce ministérielle\n\nRestrictions connues concernées : {r}\n\nConfirmer la levée des restrictions ?',reply_markup=confirm_kb('pardon_mute'))
     elif d=='adm_reports': await cb.message.answer('📊 Les rapports sont envoyés automatiquement à chaque fermeture, avec actions trusted et inactifs.',reply_markup=back_kb())
     elif d=='adm_hashban': await cb.message.answer('🚫 Hash ban\n\nEnvoie un média en privé pour l’ajouter aux hashes bannis.',reply_markup=hashban_kb())
-    elif d=='adm_settings': await cb.message.answer('⚙️ Paramètres\nHoraires + limite justice populaire.',reply_markup=settings_kb())
+    elif d=='adm_settings': await cb.message.answer('⚙️ Paramètres\nHoraires d’ouverture et de fermeture.',reply_markup=settings_kb())
     await cb.answer()
 
 @router.callback_query(F.data.startswith('goal_set:'))
@@ -236,25 +210,6 @@ async def cb_hashban_stats(cb:CallbackQuery):
     if cb.from_user and is_admin(cb.from_user.id): await cb.message.answer(f'🚫 Hash bannis : {await banned_hash_count()}'); await cb.answer()
 
 
-@router.callback_query(F.data.startswith('confirm:'))
-async def cb_confirm(cb:CallbackQuery, bot:Bot):
-    if not cb.from_user or not is_admin(cb.from_user.id): return
-    action=cb.data.split(':',1)[1]
-    if action=='pardon_ban': n=await presidential_pardon(bot); await cb.message.answer(f'👑 Grâce présidentielle exécutée.\nBannis débannis : {n}')
-    elif action=='pardon_mute': n=await ministerial_pardon(bot); await cb.message.answer(f'⚖️ Grâce ministérielle exécutée.\nRestrictions levées : {n}')
-    elif action=='justice_run':
-        try:
-            await cb.answer('Justice lancée ✅')
-        except TelegramBadRequest:
-            pass
-        await cb.message.answer('⚖️ Justice lancée. Le groupe sera bloqué 5 minutes.')
-        asyncio.create_task(execute_justice(bot, manual=True))
-        return
-    try:
-        await cb.answer()
-    except TelegramBadRequest:
-        pass
-
 @router.message(F.chat.type=='private')
 async def admin_text_state(msg:Message, bot:Bot):
     # Ce handler traite uniquement les états de configuration admin en privé.
@@ -348,69 +303,6 @@ async def cb_manual_security_close(cb:CallbackQuery, bot:Bot):
         await set_group_open(bot,False,'security')
         await cb.message.answer('🔒 Fermeture de sécurité exécutée.')
         await cb.answer()
-
-@router.callback_query(F.data=='justice_status')
-async def cb_justice_status(cb:CallbackQuery):
-    if cb.from_user and is_admin(cb.from_user.id):
-        await cb.message.answer(await justice_preview_text())
-        await cb.answer()
-
-@router.callback_query(F.data=='justice_preview')
-async def cb_justice_preview(cb:CallbackQuery):
-    if cb.from_user and is_admin(cb.from_user.id):
-        txt=await justice_preview_text()
-        if 'Aucun membre' in txt:
-            await cb.message.answer(txt)
-        else:
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Valider justice', callback_data='confirm:justice_run')],[InlineKeyboardButton(text='❌ Annuler', callback_data='adm_dashboard')]])
-            await cb.message.answer(txt, reply_markup=kb)
-        await cb.answer()
-
-@router.callback_query(F.data=='justice_run')
-async def cb_justice_run(cb:CallbackQuery, bot:Bot):
-    if cb.from_user and is_admin(cb.from_user.id):
-        txt=await justice_preview_text()
-        if 'Aucun membre' in txt:
-            await cb.message.answer(txt)
-        else:
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ Valider justice', callback_data='confirm:justice_run')],[InlineKeyboardButton(text='❌ Annuler', callback_data='adm_dashboard')]])
-            await cb.message.answer(txt, reply_markup=kb)
-        await cb.answer()
-
-
-
-@router.callback_query(F.data=='settings_justice')
-async def cb_settings_justice(cb:CallbackQuery):
-    if not cb.from_user or not is_admin(cb.from_user.id): return
-    limit = await st.justice_limit()
-    await cb.message.answer(await justice_settings_text(), reply_markup=justice_settings_kb(limit))
-    await cb.answer()
-
-@router.callback_query(F.data.startswith('justice_limit_delta:'))
-async def cb_justice_limit_delta(cb:CallbackQuery):
-    if not cb.from_user or not is_admin(cb.from_user.id): return
-    delta=int(cb.data.split(':',1)[1])
-    current=await st.justice_limit()
-    new=max(1, min(current+delta, 200))
-    await st.set_value('justice_limit', str(new))
-    try:
-        await cb.message.edit_text(await justice_settings_text(), reply_markup=justice_settings_kb(new))
-    except Exception:
-        await cb.message.answer(await justice_settings_text(), reply_markup=justice_settings_kb(new))
-    await cb.answer(f'Limite justice : {new}')
-
-@router.callback_query(F.data.startswith('justice_limit_set:'))
-async def cb_justice_limit_set(cb:CallbackQuery):
-    if not cb.from_user or not is_admin(cb.from_user.id): return
-    new=max(1, min(int(cb.data.split(':',1)[1]), 200))
-    await st.set_value('justice_limit', str(new))
-    try:
-        await cb.message.edit_text(await justice_settings_text(), reply_markup=justice_settings_kb(new))
-    except Exception:
-        await cb.message.answer(await justice_settings_text(), reply_markup=justice_settings_kb(new))
-    await cb.answer(f'Limite justice : {new}')
 
 @router.callback_query(F.data=='noop')
 async def cb_noop(cb:CallbackQuery):

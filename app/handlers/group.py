@@ -6,7 +6,6 @@ from app.services.actions import trusted_command
 from app.services.moderation import moderate_message
 from app.services.invites import on_join
 from app.services.state import track
-from app.services import settings as st
 
 router=Router()
 
@@ -31,17 +30,7 @@ async def member_update(event:ChatMemberUpdated, bot:Bot):
 
 @router.message(F.new_chat_members | F.left_chat_member)
 async def delete_service_join_leave(msg:Message, bot:Bot):
-    """Supprime immédiatement les notifications Telegram d’entrée/sortie du groupe principal.
-
-    Exception volontaire : pendant la justice populaire, on garde les notifications
-    de sortie afin que les suppressions restent visibles puis traçables/nettoyables.
-    """
-    s = get_settings()
-    if msg.chat.id != s.main_group_id:
-        return
-    keep_removed = bool(msg.left_chat_member and await st.get_value('justice_running','false') == 'true')
-    if keep_removed:
-        await track(msg.chat.id, msg.message_id, getattr(msg.left_chat_member, 'id', None), 'justice_removed_notification', False)
+    if msg.chat.id != get_settings().main_group_id:
         return
     try:
         await bot.delete_message(msg.chat.id, msg.message_id)
@@ -52,12 +41,10 @@ async def delete_service_join_leave(msg:Message, bot:Bot):
 async def all_messages(msg:Message, bot:Bot):
     if msg.from_user: await upsert_user(msg.from_user)
     if msg.chat.id == get_settings().main_group_id and (msg.new_chat_members or msg.left_chat_member):
-        keep_removed = bool(msg.left_chat_member and await st.get_value('justice_running','false') == 'true')
-        if keep_removed:
-            await track(msg.chat.id, msg.message_id, getattr(msg.left_chat_member, 'id', None), 'justice_removed_notification', False)
-        else:
-            try: await bot.delete_message(msg.chat.id, msg.message_id)
-            except Exception: pass
+        try:
+            await bot.delete_message(msg.chat.id, msg.message_id)
+        except Exception:
+            pass
         return
     if msg.chat.type=='private':
         return

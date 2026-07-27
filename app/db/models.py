@@ -30,6 +30,12 @@ class User(Base):
     created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
     last_seen: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
 
+class RecentJoin(Base):
+    __tablename__='recent_joins_test'
+    user_id: Mapped[int]=mapped_column(BigInteger, primary_key=True)
+    chat_id: Mapped[int]=mapped_column(BigInteger, primary_key=True)
+    joined_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow, index=True)
+
 class SessionLog(Base):
     __tablename__='sessions_test'
     id: Mapped[int]=mapped_column(Integer, primary_key=True, autoincrement=True)

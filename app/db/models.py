@@ -75,6 +75,21 @@ class MediaHash(Base):
     created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
     __table_args__=(Index('ix_hash_banned_unique_test','file_unique_id','banned'),)
 
+
+
+class MediaFingerprint(Base):
+    __tablename__='media_fingerprints_test'
+    id: Mapped[int]=mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True, index=True)
+    source_file_unique_id: Mapped[str]=mapped_column(String(255), index=True)
+    media_type: Mapped[str]=mapped_column(String(30), default='unknown', index=True)
+    fingerprint_kind: Mapped[str]=mapped_column(String(40), index=True)
+    fingerprint: Mapped[str]=mapped_column(String(64), index=True)
+    frame_index: Mapped[int]=mapped_column(Integer, default=0)
+    banned: Mapped[bool]=mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__=(Index('ix_media_fp_lookup_test','media_type','fingerprint_kind','banned'),)
+
 class TrustedAction(Base):
     __tablename__='trusted_actions_test'
     id: Mapped[int]=mapped_column(Integer, primary_key=True, autoincrement=True)

@@ -6,6 +6,7 @@ from app.services.actions import trusted_command
 from app.services.moderation import moderate_message
 from app.services.invites import on_join
 from app.services.state import track
+from app.services.hashban import remember_album_message
 
 router=Router()
 
@@ -48,5 +49,8 @@ async def all_messages(msg:Message, bot:Bot):
         return
     if msg.chat.type=='private':
         return
+    remember_album_message(msg)
     if msg.text and await trusted_command(bot,msg): return
-    await moderate_message(bot,msg)
+    allowed = await moderate_message(bot,msg)
+    if not allowed:
+        return

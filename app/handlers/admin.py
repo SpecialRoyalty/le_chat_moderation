@@ -12,7 +12,7 @@ from app.services.invites import top_text, send_invite_ad, invite_health_text, t
 from app.services.ads import add_ad, send_random_ad, list_ads_text, ads_health_text, ads_list_kb, ad_detail, toggle_ad, delete_ad, set_ad_text, set_ad_image, send_ad_by_id
 from app.db.session import SessionLocal
 from app.db.models import WordRule
-from app.services.hashban import ban_hash_from_message, banned_hash_count
+from app.services.hashban import ban_hashes_from_messages, banned_hash_count
 router=Router()
 
 def is_admin(uid:int): return uid in get_settings().all_admin_ids
@@ -280,8 +280,9 @@ async def admin_text_state(msg:Message, bot:Bot):
         ok=await set_tiers_from_text(msg.text or '')
         await msg.answer('✅ Paliers sauvegardés.' if ok else 'Format invalide. Exemple : 1|1 vidéo|https://gofile...', reply_markup=invite_admin_kb())
     elif state=='hash_ban_media':
-        n=await ban_hash_from_message(msg, bot)
-        if n: await msg.answer(f'✅ Hash ban ajouté : {n} média(s).', reply_markup=hashban_kb())
+        report = await ban_hashes_from_messages([msg], bot)
+        if report.media_count:
+            await msg.answer(report.admin_text('HASH BAN ADMIN'), reply_markup=hashban_kb())
         else:
             await msg.answer('Envoie une photo/vidéo/document à bannir par hash.')
             return

@@ -4,7 +4,7 @@ from sqlalchemy import select
 from aiogram import Bot
 from aiogram.types import ChatMemberUpdated, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from app.db.session import SessionLocal
-from app.db.models import User, InviteLink
+from app.db.models import User, InviteLink, RecentJoin
 from app.services.users import upsert_user
 from app.config import get_settings
 from app.services.moderation import text_has_word
@@ -92,15 +92,36 @@ async def send_invite_private(bot:Bot, user_id:int):
     await bot.send_message(user_id,'\n'.join(lines))
 
 async def on_join(event:ChatMemberUpdated, bot:Bot|None=None):
-    if not event.new_chat_member or event.new_chat_member.status not in ('member','restricted'): return
-    u=await upsert_user(event.from_user)
-    name=((event.from_user.username or '')+' '+(event.from_user.full_name or '')).strip()
+    if not event.new_chat_member or event.new_chat_member.status not in ('member','restricted'):
+        return
+
+    # L'utilisateur concerné est celui contenu dans new_chat_member. event.from_user
+    # peut être un administrateur ayant ajouté la personne.
+    joined_user = event.new_chat_member.user
+    u = await upsert_user(joined_user)
+    name = ((joined_user.username or '') + ' ' + (joined_user.full_name or '')).strip()
+
     if bot and await text_has_word('nameban', name):
         try:
-            await bot.ban_chat_member(event.chat.id, event.from_user.id)
-            u.is_banned=True
-        except Exception as e: await log_error('nameban_join', e)
+            await bot.ban_chat_member(event.chat.id, joined_user.id)
+            u.is_banned = True
+        except Exception as e:
+            await log_error('nameban_join', e)
         return
+
+    # Mémorisation persistante de l'heure d'arrivée. Cette donnée sert à bannir
+    # un nouveau membre qui publie un média dans les 60 premières secondes.
+    async with SessionLocal() as db:
+        recent = await db.get(RecentJoin, (joined_user.id, event.chat.id))
+        if recent:
+            recent.joined_at = datetime.utcnow()
+        else:
+            db.add(RecentJoin(
+                user_id=joined_user.id,
+                chat_id=event.chat.id,
+                joined_at=datetime.utcnow(),
+            ))
+        await db.commit()
     owner=None
     inv=getattr(event,'invite_link',None)
     link=getattr(inv,'invite_link',None) if inv else None
@@ -109,9 +130,9 @@ async def on_join(event:ChatMemberUpdated, bot:Bot|None=None):
             res=await db.execute(select(InviteLink).where(InviteLink.link==link,InviteLink.active==True).limit(1))
             row=res.scalar_one_or_none()
             if row: owner=row.owner_id
-    if owner and owner==event.from_user.id:
+    if owner and owner==joined_user.id:
         owner=None
-    JOIN_CACHE[event.from_user.id]=(owner, datetime.utcnow())
+    JOIN_CACHE[joined_user.id]=(owner, datetime.utcnow())
 
 async def _maybe_reward(bot:Bot, owner:int):
     async with SessionLocal() as db:

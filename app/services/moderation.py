@@ -7,7 +7,7 @@ from aiogram import Bot
 from aiogram.types import Message
 from app.config import get_settings
 from app.db.session import SessionLocal
-from app.db.models import WordRule, MediaHash, User
+from app.db.models import WordRule, MediaHash, User, RecentJoin
 from app.services.users import protected, display_name
 from app.services.state import track, log_error
 from app.services.hashban import contains_banned_hash, media_file_entries
@@ -18,6 +18,7 @@ def has_link(text: str): return bool(re.search(r'(https?://|t\.me/|www\.|\.com\b
 def has_mention(text: str): return '@' in (text or '')
 def has_command(text: str): return (text or '').strip().startswith('/')
 def is_media(msg: Message): return bool(msg.photo or msg.video or msg.document or msg.animation or msg.audio or msg.voice or msg.video_note)
+def is_story(msg: Message): return getattr(msg, 'story', None) is not None
 def file_ids(msg: Message): return [(u, f, t) for u, f, t, _size in media_file_entries(msg)]
 
 
@@ -135,11 +136,34 @@ async def moderate_message(bot: Bot, msg: Message) -> bool:
     trusted = uid in get_settings().trusted_id_set
     admin = uid in get_settings().admin_id_set
 
+    # Toute story partagée ou transférée est supprimée et son expéditeur banni.
+    # getattr est utilisé pour rester robuste avec les objets Message d'aiogram.
+    if is_story(msg):
+        await delete(bot, msg)
+        await ban(bot, msg.chat.id, uid)
+        await st.set_value('last_story_ban_user', str(uid))
+        await st.set_value('last_story_ban_at', datetime.utcnow().isoformat(timespec='seconds'))
+        return False
+
     if not await st.is_open() and not (trusted or admin):
         await delete(bot, msg)
         return False
 
     if is_media(msg):
+        # Un membre qui publie un média moins de 60 secondes après son arrivée
+        # est considéré comme un compte de spam. Les comptes protégés restent
+        # protégés par la fonction ban(), conformément au reste du bot.
+        async with SessionLocal() as db:
+            recent_join = await db.get(RecentJoin, (uid, msg.chat.id))
+            joined_at = recent_join.joined_at if recent_join else None
+
+        if joined_at and datetime.utcnow() - joined_at <= timedelta(seconds=60):
+            await delete(bot, msg)
+            await ban(bot, msg.chat.id, uid)
+            await st.set_value('last_fast_media_ban_user', str(uid))
+            await st.set_value('last_fast_media_ban_at', datetime.utcnow().isoformat(timespec='seconds'))
+            return False
+
         blocked, details = await contains_banned_hash(bot, msg)
         if blocked:
             await delete(bot, msg)

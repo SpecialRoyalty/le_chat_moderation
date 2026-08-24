@@ -13,6 +13,7 @@ from app.services.ads import add_ad, send_random_ad, list_ads_text, ads_health_t
 from app.db.session import SessionLocal
 from app.db.models import WordRule
 from app.services.hashban import ban_hashes_from_messages, banned_hash_count
+from app.services.moderation import invalidate_word_cache
 router=Router()
 
 def is_admin(uid:int): return uid in get_settings().all_admin_ids
@@ -231,6 +232,7 @@ async def admin_text_state(msg:Message, bot:Bot):
         word=(msg.text or '').strip().lower()
         if word:
             async with SessionLocal() as db: db.add(WordRule(kind=kind,word=word)); await db.commit()
+            invalidate_word_cache(kind)
             await msg.answer(f'✅ Ajouté dans {kind}: {word}',reply_markup=mod_kb())
     elif state=='rules_text':
         await st.set_value('rules_text',msg.text or ''); await msg.answer('✅ Règles sauvegardées.',reply_markup=admin_kb())

@@ -40,7 +40,12 @@ async def delete_service_join_leave(msg:Message, bot:Bot):
 
 @router.message()
 async def all_messages(msg:Message, bot:Bot):
-    if msg.from_user: await upsert_user(msg.from_user)
+    # Les commandes trusted passent AVANT upsert_user : on évite une requête/commit DB
+    # inutile avant une action de modération urgente.
+    if msg.chat.type != 'private' and msg.text and await trusted_command(bot, msg):
+        return
+    if msg.from_user:
+        await upsert_user(msg.from_user)
     if msg.chat.id == get_settings().main_group_id and (msg.new_chat_members or msg.left_chat_member):
         try:
             await bot.delete_message(msg.chat.id, msg.message_id)
@@ -50,7 +55,6 @@ async def all_messages(msg:Message, bot:Bot):
     if msg.chat.type=='private':
         return
     remember_album_message(msg)
-    if msg.text and await trusted_command(bot,msg): return
     allowed = await moderate_message(bot,msg)
     if not allowed:
         return

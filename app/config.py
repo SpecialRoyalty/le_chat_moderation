@@ -1,5 +1,5 @@
 from __future__ import annotations
-from functools import lru_cache
+from functools import lru_cache, cached_property
 from typing import Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -53,15 +53,15 @@ class Settings(BaseSettings):
         if v is None or v == '': return None
         return int(v)
 
-    @property
+    @cached_property
     def admin_id_set(self) -> set[int]:
         return set(self._parse_ids(self.admin_ids))
 
-    @property
+    @cached_property
     def trusted_id_set(self) -> set[int]:
         return set(self._parse_ids(self.trusted_ids))
 
-    @property
+    @cached_property
     def all_admin_ids(self) -> set[int]:
         return self.admin_id_set | self.trusted_id_set
 

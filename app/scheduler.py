@@ -38,7 +38,14 @@ async def top_tick(bot:Bot):
     from datetime import datetime
     await st.set_value('last_top_sent_at', datetime.utcnow().isoformat(timespec='seconds'))
 def start_scheduler(bot:Bot):
-    sch=AsyncIOScheduler(timezone=get_settings().timezone)
+    sch=AsyncIOScheduler(
+        timezone=get_settings().timezone,
+        job_defaults={
+            'coalesce': True,
+            'max_instances': 1,
+            'misfire_grace_time': 30,
+        },
+    )
     sch.add_job(tick,'interval',minutes=1,args=[bot], id='tick')
     sch.add_job(validate_invites,'interval',minutes=1,args=[bot], id='invite_validate')
     sch.add_job(rules_tick,'interval',minutes=30,args=[bot], id='rules')

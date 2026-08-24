@@ -31,6 +31,14 @@ _IMAGE_DISTANCE_LIMIT = 10
 _VIDEO_DISTANCE_LIMIT = 11
 _VIDEO_MATCH_RATIO = 0.45
 
+# Cache court des capacités de blacklist et des empreintes bannies. Les hashes
+# perceptuels changent uniquement lors d'un hash-ban, donc les relire entièrement
+# depuis PostgreSQL pour chaque vidéo est inutile.
+_BAN_CACHE_TTL_SECONDS = 30.0
+_BAN_CAP_CACHE: dict[str, tuple[float, bool, bool]] = {}
+_BANNED_EXACT_CACHE: tuple[float, set[str]] | None = None
+_BANNED_FP_CACHE: dict[str, tuple[float, dict[str, dict[str, list[int]]]]] = {}
+
 
 @dataclass
 class HashBanReport:
@@ -227,8 +235,11 @@ async def perceptual_fingerprints(bot: Bot, msg: Message) -> tuple[list[tuple[st
     suffix = '.jpg' if media_type == 'photo' else '.mp4'
     path = None
     try:
+        # Le réseau n'est pas sérialisé : seuls FFmpeg/Pillow, plus coûteux en
+        # CPU, passent dans le sémaphore. Plusieurs téléchargements Telegram
+        # peuvent donc avancer en parallèle.
+        path = await _download_to_temp(bot, file_id, suffix)
         async with _MEDIA_ANALYSIS_SEMAPHORE:
-            path = await _download_to_temp(bot, file_id, suffix)
             if media_type == 'photo':
                 values = await asyncio.to_thread(_image_fingerprints, path)
             else:
@@ -241,6 +252,144 @@ async def perceptual_fingerprints(bot: Bot, msg: Message) -> tuple[list[tuple[st
     finally:
         if path:
             Path(path).unlink(missing_ok=True)
+
+
+async def _analyse_media_once(bot: Bot, msg: Message, need_perceptual: bool = True):
+    """Télécharge un média une seule fois puis calcule SHA + perceptuel.
+
+    Avant cette optimisation, une vidéo normale pouvait être téléchargée une
+    fois pour le SHA256 puis une seconde fois pour le fingerprint vidéo.
+    """
+    entries = media_file_entries(msg)
+    if not entries:
+        return None, [], 'aucun média compatible'
+    _unique, file_id, media_type, _size = entries[0]
+    suffix = '.jpg' if media_type == 'photo' else ('.mp4' if media_type in {'video','animation','video_note'} else '.bin')
+    path = None
+    errors: list[str] = []
+    try:
+        path = await _download_to_temp(bot, file_id, suffix)
+        sha = 'sha256:' + await asyncio.to_thread(_sha256_path, path)
+        fingerprints: list[tuple[str, str, int]] = []
+        if need_perceptual and media_type in {'photo', 'video', 'animation', 'video_note'}:
+            try:
+                async with _MEDIA_ANALYSIS_SEMAPHORE:
+                    if media_type == 'photo':
+                        fingerprints = await asyncio.to_thread(_image_fingerprints, path)
+                    else:
+                        fingerprints = await asyncio.to_thread(_extract_video_fingerprints, path)
+            except Exception as exc:
+                errors.append(f'{media_type}: {type(exc).__name__}: {exc}')
+        return sha, fingerprints, '; '.join(errors) if errors else None
+    except Exception as exc:
+        error = f'{media_type}: {type(exc).__name__}: {exc}'
+        logger.warning('[HASHBAN] Analyse média impossible: %s', error)
+        return None, [], error
+    finally:
+        if path:
+            Path(path).unlink(missing_ok=True)
+
+
+def _invalidate_ban_caches() -> None:
+    global _BANNED_EXACT_CACHE
+    _BAN_CAP_CACHE.clear()
+    _BANNED_FP_CACHE.clear()
+    _BANNED_EXACT_CACHE = None
+
+
+async def _banned_exact_keys() -> set[str]:
+    global _BANNED_EXACT_CACHE
+    now = time.monotonic()
+    if _BANNED_EXACT_CACHE and now < _BANNED_EXACT_CACHE[0]:
+        return _BANNED_EXACT_CACHE[1]
+    async with SessionLocal() as db:
+        keys = set((await db.execute(select(MediaHash.file_unique_id).where(
+            MediaHash.banned.is_(True)
+        ))).scalars().all())
+    _BANNED_EXACT_CACHE = (now + _BAN_CACHE_TTL_SECONDS, keys)
+    return keys
+
+
+async def _ban_capabilities(media_type: str) -> tuple[bool, bool]:
+    now = time.monotonic()
+    cached = _BAN_CAP_CACHE.get(media_type)
+    if cached and now < cached[0]:
+        return cached[1], cached[2]
+    keys = await _banned_exact_keys()
+    sha_exists = any(key.startswith('sha256:') for key in keys)
+    async with SessionLocal() as db:
+        fp_exists = (await db.execute(select(MediaFingerprint.id).where(
+            MediaFingerprint.banned.is_(True),
+            MediaFingerprint.media_type == media_type,
+        ).limit(1))).scalar_one_or_none() is not None
+    _BAN_CAP_CACHE[media_type] = (now + _BAN_CACHE_TTL_SECONDS, sha_exists, fp_exists)
+    return sha_exists, fp_exists
+
+
+async def _banned_fingerprint_groups(media_type: str) -> dict[str, dict[str, list[int]]]:
+    now = time.monotonic()
+    cached = _BANNED_FP_CACHE.get(media_type)
+    if cached and now < cached[0]:
+        return cached[1]
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(
+            MediaFingerprint.source_file_unique_id,
+            MediaFingerprint.fingerprint_kind,
+            MediaFingerprint.fingerprint,
+        ).where(
+            MediaFingerprint.banned.is_(True),
+            MediaFingerprint.media_type == media_type,
+        ))).all()
+    grouped: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+    for source, kind, fingerprint in rows:
+        grouped[source][kind].append(int(fingerprint, 16))
+    # Convertit les defaultdict imbriqués en dict simples pour le cache.
+    plain = {source: {kind: list(values) for kind, values in by_kind.items()} for source, by_kind in grouped.items()}
+    _BANNED_FP_CACHE[media_type] = (now + _BAN_CACHE_TTL_SECONDS, plain)
+    return plain
+
+
+def _match_fingerprints(media_type: str, current: list[tuple[str, str, int]], grouped: dict[str, dict[str, list[int]]]):
+    details = {'computed': len(current), 'best_distance': None, 'matched_frames': 0, 'required_frames': 0, 'source': None, 'error': None}
+    # Conversion hex -> int une seule fois par empreinte courante. Avant, cette
+    # conversion était répétée pour chaque vidéo bannie comparée.
+    prepared = [(kind, int(value, 16), idx) for kind, value, idx in current]
+    best_distance: int | None = None
+    for source, by_kind in grouped.items():
+        if media_type == 'photo':
+            matches = 0
+            for kind, value, _idx in prepared:
+                olds = by_kind.get(kind, [])
+                if not olds:
+                    continue
+                distance = min((value ^ old).bit_count() for old in olds)
+                best_distance = distance if best_distance is None else min(best_distance, distance)
+                if distance <= _IMAGE_DISTANCE_LIMIT:
+                    matches += 1
+            if matches >= 1:
+                details.update(best_distance=best_distance, matched_frames=matches, required_frames=1, source=source)
+                return True, details
+            continue
+
+        matched_positions: set[int] = set()
+        frame_positions = {idx for _kind, _value, idx in prepared}
+        required = max(3, math.ceil(len(frame_positions) * _VIDEO_MATCH_RATIO))
+        for kind, value, idx in prepared:
+            olds = by_kind.get(kind, [])
+            if not olds:
+                continue
+            distance = min((value ^ old).bit_count() for old in olds)
+            best_distance = distance if best_distance is None else min(best_distance, distance)
+            if distance <= _VIDEO_DISTANCE_LIMIT:
+                matched_positions.add(idx)
+        if len(matched_positions) >= required:
+            details.update(best_distance=best_distance, matched_frames=len(matched_positions), required_frames=required, source=source)
+            return True, details
+        details['required_frames'] = required
+        details['matched_frames'] = max(details['matched_frames'], len(matched_positions))
+
+    details['best_distance'] = best_distance
+    return False, details
 
 
 def _hamming(left: str, right: str) -> int:
@@ -275,28 +424,31 @@ async def ban_hashes_from_messages(messages: list[Message], bot: Bot) -> HashBan
             seen_ids.add(key)
             unique_messages.append(message)
 
+    # Toutes les opérations lentes Telegram/FFmpeg sont réalisées sans garder
+    # une connexion PostgreSQL ouverte.
+    analysed = []
+    for msg in unique_messages:
+        unique, file_id, media_type, _size = media_file_entries(msg)[0]
+        sha, fingerprints, error = await _analyse_media_once(bot, msg, need_perceptual=True)
+        analysed.append((msg, unique, file_id, media_type, sha, fingerprints, error))
+
     async with SessionLocal() as db:
-        for msg in unique_messages:
+        for msg, unique, file_id, media_type, sha, fingerprints, error in analysed:
             report.media_count += 1
             user_id = msg.from_user.id if msg.from_user else None
-            unique, file_id, media_type, _size = media_file_entries(msg)[0]
             keys = [unique]
-            sha = await file_sha256(bot, file_id)
             if sha:
                 keys.append(sha)
                 report.sha256_count += 1
             else:
                 report.errors.append(f'{media_type}: SHA256 non calculé')
-
-            for key in keys:
-                await _upsert_exact_banned(
-                    db, key=key, user_id=user_id, file_id=file_id, media_type=media_type
-                )
-                report.exact_keys += 1
-
-            fingerprints, error = await perceptual_fingerprints(bot, msg)
             if error:
                 report.errors.append(error)
+
+            for key in keys:
+                await _upsert_exact_banned(db, key=key, user_id=user_id, file_id=file_id, media_type=media_type)
+                report.exact_keys += 1
+
             for kind, fingerprint, frame_index in fingerprints:
                 rows = list((await db.execute(select(MediaFingerprint).where(
                     MediaFingerprint.fingerprint == fingerprint,
@@ -321,7 +473,7 @@ async def ban_hashes_from_messages(messages: list[Message], bot: Bot) -> HashBan
                 report.perceptual_count += 1
         await db.commit()
 
-    # Vérification immédiate : toute clé exacte créée doit être bannie.
+    _invalidate_ban_caches()
     return report
 
 
@@ -344,21 +496,23 @@ async def exact_banned_match(bot: Bot, msg: Message) -> tuple[bool, dict]:
             MediaHash.file_unique_id == unique,
             MediaHash.banned.is_(True),
         ).limit(1))).scalar_one_or_none() is not None
-        details['telegram_match'] = telegram_match
-        if telegram_match:
-            return True, details
+    details['telegram_match'] = telegram_match
+    if telegram_match:
+        return True, details
 
-        sha = await file_sha256(bot, file_id)
-        details['sha'] = sha
-        if not sha:
-            details['errors'].append('SHA256 non calculé')
-            return False, details
+    # Le téléchargement peut durer : aucune connexion DB n'est gardée pendant ce temps.
+    sha = await file_sha256(bot, file_id)
+    details['sha'] = sha
+    if not sha:
+        details['errors'].append('SHA256 non calculé')
+        return False, details
+    async with SessionLocal() as db:
         sha_match = (await db.execute(select(MediaHash.id).where(
             MediaHash.file_unique_id == sha,
             MediaHash.banned.is_(True),
         ).limit(1))).scalar_one_or_none() is not None
-        details['sha_match'] = sha_match
-        return sha_match, details
+    details['sha_match'] = sha_match
+    return sha_match, details
 
 
 async def perceptual_banned_match(bot: Bot, msg: Message) -> tuple[bool, dict]:
@@ -370,87 +524,85 @@ async def perceptual_banned_match(bot: Bot, msg: Message) -> tuple[bool, dict]:
     if media_type not in {'photo', 'video', 'animation', 'video_note'}:
         return False, details
 
-    async with SessionLocal() as db:
-        # Ne télécharge pas le média si aucune empreinte perceptuelle bannie n'existe.
-        exists = (await db.execute(select(MediaFingerprint.id).where(
-            MediaFingerprint.banned.is_(True),
-            MediaFingerprint.media_type == media_type,
-        ).limit(1))).scalar_one_or_none()
-        if exists is None:
-            return False, details
-
+    grouped = await _banned_fingerprint_groups(media_type)
+    if not grouped:
+        return False, details
     current, error = await perceptual_fingerprints(bot, msg)
     details['computed'] = len(current)
     details['error'] = error
     if not current:
         return False, details
-
-    async with SessionLocal() as db:
-        banned = list((await db.execute(select(MediaFingerprint).where(
-            MediaFingerprint.banned.is_(True),
-            MediaFingerprint.media_type == media_type,
-        ))).scalars().all())
-
-    grouped: dict[str, list[MediaFingerprint]] = defaultdict(list)
-    for row in banned:
-        grouped[row.source_file_unique_id].append(row)
-
-    best_distance: int | None = None
-    for source, rows in grouped.items():
-        by_kind: dict[str, list[str]] = defaultdict(list)
-        for row in rows:
-            by_kind[row.fingerprint_kind].append(row.fingerprint)
-
-        if media_type == 'photo':
-            matches = 0
-            for kind, value, _idx in current:
-                distances = [_hamming(value, old) for old in by_kind.get(kind, [])]
-                if not distances:
-                    continue
-                distance = min(distances)
-                best_distance = distance if best_distance is None else min(best_distance, distance)
-                if distance <= _IMAGE_DISTANCE_LIMIT:
-                    matches += 1
-            if matches >= 1:
-                details.update(best_distance=best_distance, matched_frames=matches, required_frames=1, source=source)
-                return True, details
-            continue
-
-        # Pour une vidéo, on exige plusieurs images concordantes avec la même vidéo bannie.
-        matched_positions: set[int] = set()
-        frame_positions = {idx for _kind, _value, idx in current}
-        required = max(3, math.ceil(len(frame_positions) * _VIDEO_MATCH_RATIO))
-        for kind, value, idx in current:
-            distances = [_hamming(value, old) for old in by_kind.get(kind, [])]
-            if not distances:
-                continue
-            distance = min(distances)
-            best_distance = distance if best_distance is None else min(best_distance, distance)
-            if distance <= _VIDEO_DISTANCE_LIMIT:
-                matched_positions.add(idx)
-        if len(matched_positions) >= required:
-            details.update(
-                best_distance=best_distance,
-                matched_frames=len(matched_positions),
-                required_frames=required,
-                source=source,
-            )
-            return True, details
-        details['required_frames'] = required
-        details['matched_frames'] = max(details['matched_frames'], len(matched_positions))
-
-    details['best_distance'] = best_distance
-    return False, details
+    matched, match_details = _match_fingerprints(media_type, current, grouped)
+    match_details['error'] = error
+    return matched, match_details
 
 
 async def contains_banned_hash(bot: Bot, msg: Message) -> tuple[bool, dict]:
-    exact, exact_details = await exact_banned_match(bot, msg)
-    if exact:
-        return True, {'method': 'exact', **exact_details}
-    perceptual, perceptual_details = await perceptual_banned_match(bot, msg)
-    if perceptual:
-        return True, {'method': 'perceptual', **exact_details, **perceptual_details}
-    return False, {'method': 'none', **exact_details, **perceptual_details}
+    entries = media_file_entries(msg)
+    if not entries:
+        return False, {'method': 'none'}
+    unique, file_id, media_type, _size = entries[0]
+
+    # 1) Identifiant Telegram : cache mémoire, aucun aller-retour DB par média.
+    banned_keys = await _banned_exact_keys()
+    if unique in banned_keys:
+        return True, {'method': 'telegram_id', 'telegram_match': True, 'sha_match': False}
+
+    # 2) S'il n'existe ni SHA ni fingerprint banni, aucune raison de télécharger.
+    sha_exists, fp_exists = await _ban_capabilities(media_type)
+    if not sha_exists and not fp_exists:
+        return False, {'method': 'none', 'telegram_match': False, 'sha_match': False}
+
+    # 3) Téléchargement UNIQUE. On teste le SHA avant de lancer FFmpeg : un
+    # repost exact est donc bloqué sans payer le coût de l'analyse perceptuelle.
+    suffix = '.jpg' if media_type == 'photo' else ('.mp4' if media_type in {'video','animation','video_note'} else '.bin')
+    path = None
+    sha = None
+    error = None
+    try:
+        path = await _download_to_temp(bot, file_id, suffix)
+        sha = 'sha256:' + await asyncio.to_thread(_sha256_path, path)
+        if sha_exists and sha in banned_keys:
+            return True, {
+                'method': 'sha256', 'telegram_match': False, 'sha_match': True,
+                'sha': sha, 'error': None,
+            }
+
+        current: list[tuple[str, str, int]] = []
+        if fp_exists and media_type in {'photo', 'video', 'animation', 'video_note'}:
+            try:
+                async with _MEDIA_ANALYSIS_SEMAPHORE:
+                    if media_type == 'photo':
+                        current = await asyncio.to_thread(_image_fingerprints, path)
+                    else:
+                        current = await asyncio.to_thread(_extract_video_fingerprints, path)
+            except Exception as exc:
+                error = f'{media_type}: {type(exc).__name__}: {exc}'
+                logger.warning('[HASHBAN] Analyse perceptuelle impossible: %s', error)
+
+        if fp_exists and current:
+            grouped = await _banned_fingerprint_groups(media_type)
+            matched, details = _match_fingerprints(media_type, current, grouped)
+            details.update({
+                'method': 'perceptual' if matched else 'none',
+                'telegram_match': False, 'sha_match': False, 'sha': sha, 'error': error,
+            })
+            return matched, details
+
+        return False, {
+            'method': 'none', 'telegram_match': False, 'sha_match': False,
+            'sha': sha, 'error': error, 'computed': len(current),
+        }
+    except Exception as exc:
+        error = f'{media_type}: {type(exc).__name__}: {exc}'
+        logger.warning('[HASHBAN] Analyse média impossible: %s', error)
+        return False, {
+            'method': 'none', 'telegram_match': False, 'sha_match': False,
+            'sha': sha, 'error': error, 'computed': 0,
+        }
+    finally:
+        if path:
+            Path(path).unlink(missing_ok=True)
 
 
 async def hash_diagnostic(bot: Bot, msg: Message) -> str:

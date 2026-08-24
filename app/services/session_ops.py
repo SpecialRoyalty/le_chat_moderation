@@ -1,6 +1,8 @@
+import asyncio
 from datetime import datetime, timedelta
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from aiogram import Bot
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from app.config import get_settings
 from app.db.session import SessionLocal
@@ -20,58 +22,96 @@ async def set_group_open(bot:Bot, open_:bool, kind='auto'):
         if await st.is_open():
             await ensure_status_message(bot,s.main_group_id); return
         async with SessionLocal() as db:
-            sess=SessionLog(chat_id=s.main_group_id,kind=kind,status='open'); db.add(sess); await db.flush()
-            await st.set_value('active_session_id',str(sess.id))
+            sess=SessionLog(chat_id=s.main_group_id,kind=kind,status='open')
+            db.add(sess)
+            await db.flush()
+            sid=sess.id
             await db.commit()
-        await st.set_open(True)
-        await st.set_value('manual_opened_at', datetime.utcnow().isoformat() if kind=='manual' else '')
+        await st.set_values({
+            'active_session_id': str(sid),
+            'group_open': 'true',
+            'manual_opened_at': datetime.utcnow().isoformat() if kind=='manual' else '',
+        })
     else:
         if not await st.is_open():
             await ensure_status_message(bot,s.main_group_id); return
         sid=int(await st.get_value('active_session_id','0') or '0')
         await cleanup_session(bot, all_known=False)
         await close_active_session()
-        await st.set_open(False)
+        await st.set_value('group_open','false')
         await send_report(bot, kind, sid=sid)
     await ensure_status_message(bot,s.main_group_id)
 
 async def close_active_session():
-    async with SessionLocal() as db:
-        sid=int(await st.get_value('active_session_id','0') or '0')
-        if sid:
+    sid=int(await st.get_value('active_session_id','0') or '0')
+    if sid:
+        async with SessionLocal() as db:
             sess=await db.get(SessionLog,sid)
-            if sess: sess.status='closed'; sess.closed_at=datetime.utcnow()
-        await st.set_value('active_session_id','0')
-        await st.set_value('manual_opened_at','')
-        await db.commit()
+            if sess:
+                sess.status='closed'
+                sess.closed_at=datetime.utcnow()
+            await db.commit()
+    await st.set_values({'active_session_id':'0','manual_opened_at':''})
 
 async def cleanup_session(bot:Bot, all_known:bool=False):
-    s=get_settings(); sid=int(await st.get_value('active_session_id','0') or '0')
-    deleted=0; failed=0; media_failed=0
+    s=get_settings()
+    sid=int(await st.get_value('active_session_id','0') or '0')
     async with SessionLocal() as db:
-        q=select(TrackedMessage).where(TrackedMessage.chat_id==s.main_group_id,TrackedMessage.deleted==False,TrackedMessage.kind!='status')
-        if sid and not all_known: q=q.where(TrackedMessage.session_id==sid)
-        res=await db.execute(q)
-        items=list(res.scalars().all())
-        for tm in items:
+        q=select(
+            TrackedMessage.id, TrackedMessage.chat_id,
+            TrackedMessage.message_id, TrackedMessage.is_media,
+        ).where(
+            TrackedMessage.chat_id==s.main_group_id,
+            TrackedMessage.deleted.is_(False),
+            TrackedMessage.kind!='status',
+        )
+        if sid and not all_known:
+            q=q.where(TrackedMessage.session_id==sid)
+        items=(await db.execute(q)).all()
+
+    # Ne garde aucune connexion PostgreSQL pendant les suppressions Telegram.
+    # Huit requêtes concurrentes donnent un gros gain sur les fins de session
+    # sans envoyer une rafale illimitée à l'API.
+    sem=asyncio.Semaphore(8)
+    async def remove(item):
+        async with sem:
             try:
-                await bot.delete_message(tm.chat_id,tm.message_id); tm.deleted=True; deleted+=1
-            except Exception as e:
-                failed+=1
-                if tm.is_media: media_failed+=1
-                await log_error('cleanup_delete',f'{tm.chat_id}/{tm.message_id}: {e}')
-        if sid:
-            sess=await db.get(SessionLog,sid)
-            if sess: sess.messages_deleted+=deleted
+                await bot.delete_message(item.chat_id,item.message_id)
+                return True, None
+            except TelegramBadRequest as exc:
+                if 'message to delete not found' in str(exc).lower():
+                    return True, None
+                return False, exc
+            except Exception as exc:
+                return False, exc
+
+    results=await asyncio.gather(*(remove(item) for item in items)) if items else []
+    deleted_ids=[item.id for item,(ok,_exc) in zip(items,results) if ok]
+    failures=[(item,exc) for item,(ok,exc) in zip(items,results) if not ok]
+    deleted=len(deleted_ids)
+    failed=len(failures)
+    media_failed=sum(1 for item,_exc in failures if item.is_media)
+
+    async with SessionLocal() as db:
+        if deleted_ids:
+            await db.execute(update(TrackedMessage).where(TrackedMessage.id.in_(deleted_ids)).values(deleted=True))
+        if sid and deleted:
+            await db.execute(update(SessionLog).where(SessionLog.id==sid).values(
+                messages_deleted=SessionLog.messages_deleted + deleted
+            ))
         await db.commit()
-    if failed:
+
+    if failures:
+        sample='; '.join(f'{item.chat_id}/{item.message_id}: {exc}' for item,exc in failures[:5])
+        await log_error('cleanup_delete', f'{failed} échec(s). Exemples: {sample}')
         await notify_admins(bot,f'🚨 ERREUR NETTOYAGE\n\nMessages non supprimés : {failed}\nMédias non supprimés : {media_failed}\n\nVérifie que le bot est admin avec droit “Supprimer les messages”, puis relance 🧹 Nettoyage.')
     return deleted, failed
 
 async def notify_admins(bot:Bot,text:str, reply_markup=None):
-    for aid in get_settings().admin_id_set:
-        try: await bot.send_message(aid,text,reply_markup=reply_markup)
-        except Exception: pass
+    await asyncio.gather(
+        *(bot.send_message(aid,text,reply_markup=reply_markup) for aid in get_settings().admin_id_set),
+        return_exceptions=True,
+    )
 
 async def send_report(bot:Bot, kind='auto', sid:int|None=None):
     async with SessionLocal() as db:

@@ -7,7 +7,7 @@ from app.db.session import SessionLocal
 from app.db.models import User, InviteLink, RecentJoin
 from app.services.users import upsert_user
 from app.config import get_settings
-from app.services.moderation import text_has_word
+from app.services.moderation import text_has_word, remember_recent_join
 from app.services.state import log_error, track
 from app.services import settings as st
 
@@ -98,13 +98,12 @@ async def on_join(event:ChatMemberUpdated, bot:Bot|None=None):
     # L'utilisateur concerné est celui contenu dans new_chat_member. event.from_user
     # peut être un administrateur ayant ajouté la personne.
     joined_user = event.new_chat_member.user
-    u = await upsert_user(joined_user)
+    await upsert_user(joined_user, force=True)
     name = ((joined_user.username or '') + ' ' + (joined_user.full_name or '')).strip()
 
     if bot and await text_has_word('nameban', name):
         try:
             await bot.ban_chat_member(event.chat.id, joined_user.id)
-            u.is_banned = True
         except Exception as e:
             await log_error('nameban_join', e)
         return
@@ -122,6 +121,7 @@ async def on_join(event:ChatMemberUpdated, bot:Bot|None=None):
                 joined_at=datetime.utcnow(),
             ))
         await db.commit()
+    remember_recent_join(joined_user.id, event.chat.id)
     owner=None
     inv=getattr(event,'invite_link',None)
     link=getattr(inv,'invite_link',None) if inv else None

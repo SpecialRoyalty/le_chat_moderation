@@ -102,8 +102,14 @@ async def status_text(chat_id: int):
     if active:
         name = await group_display_name(active)
         link = await group_navigation_link(active)
-        suffix = '\n\n➡️ Utilisez le bouton ci-dessous.' if link else ''
-        return f'🔴 MAINTENANCE\n\nLa session se déroule actuellement dans {name}.{suffix}'
+        suffix = '\n\n🚀 Utilise le bouton ci-dessous pour le rejoindre directement.' if link else ''
+        return (
+            '🌙 CE GROUPE EST EN PAUSE\n\n'
+            'La session est actuellement en cours dans :\n'
+            f'🔥 {name}\n\n'
+            'Rejoins le groupe actif pour participer avec tout le monde.'
+            f'{suffix}'
+        )
 
     # Aucun groupe ouvert : seul le groupe sélectionné reçoit le système de vote.
     if selected == chat_id:
@@ -137,13 +143,21 @@ async def status_text(chat_id: int):
     if selected:
         name = await group_display_name(selected)
         link = await group_navigation_link(selected)
-        suffix = '\n\n➡️ Rejoignez-le avec le bouton ci-dessous.' if link else ''
+        suffix = '\n\n🚀 Utilise le bouton ci-dessous pour le rejoindre directement.' if link else ''
         return (
-            '🔴 MAINTENANCE\n\n'
-            f'Le prochain vote / la prochaine ouverture aura lieu dans {name}.{suffix}'
+            '⏳ PROCHAINE SESSION\n\n'
+            'Ce groupe reste fermé pour le moment.\n\n'
+            '🗳️ Le prochain vote et la prochaine ouverture auront lieu dans :\n'
+            f'🔥 {name}\n\n'
+            'Rejoins-le dès maintenant pour ne pas rater la prochaine ouverture.'
+            f'{suffix}'
         )
 
-    return '🔴 MAINTENANCE\n\nAucun groupe n’est sélectionné pour la prochaine ouverture.'
+    return (
+        '🌙 CE GROUPE EST EN PAUSE\n\n'
+        'Aucune prochaine session n’est encore programmée.\n'
+        'Une annonce apparaîtra ici dès qu’un groupe sera sélectionné.'
+    )
 
 
 async def track(chat_id: int, message_id: int, user_id: int | None, kind='message', is_media=False):

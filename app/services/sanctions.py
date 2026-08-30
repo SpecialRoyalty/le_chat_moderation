@@ -10,6 +10,7 @@ from sqlalchemy import select, update
 from app.config import get_settings
 from app.db.models import GlobalSanction, NetworkGroup, User
 from app.db.session import SessionLocal
+from app.services import settings as st
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,49 @@ async def restrict_global(bot: Bot, user_id: int, days: int, *, source_chat_id: 
 
     results = await asyncio.gather(*(one(chat_id) for chat_id in group_ids)) if group_ids else []
     return dict(results)
+
+
+async def capture_manual_admin_ban(bot: Bot, event) -> bool:
+    """Propage un ban manuel Telegram à tout le réseau.
+
+    Le Bot API envoie un ``chat_member`` quand un administrateur bannit un
+    membre depuis l'interface Telegram. Les bans déclenchés par le bot lui-même
+    sont ignorés pour éviter une boucle de propagation. La sanction est
+    persistée avant les appels Telegram, donc elle reste valable pour les
+    groupes encore non rejoints, momentanément hors-ligne ou ajoutés plus tard.
+    """
+    try:
+        new_member = getattr(event, 'new_chat_member', None)
+        old_member = getattr(event, 'old_chat_member', None)
+        if not new_member or getattr(new_member, 'status', None) != 'kicked':
+            return False
+        if old_member and getattr(old_member, 'status', None) == 'kicked':
+            return False
+
+        target = getattr(new_member, 'user', None)
+        if not target or _protected(target.id):
+            return False
+
+        actor = getattr(event, 'from_user', None)
+        bot_id_raw = await st.get_value('bot_id', '0')
+        try:
+            bot_id = int(bot_id_raw or 0)
+        except (TypeError, ValueError):
+            bot_id = 0
+        if actor and bot_id and actor.id == bot_id:
+            return False
+
+        await ban_global(
+            bot,
+            target.id,
+            source_chat_id=getattr(getattr(event, 'chat', None), 'id', None),
+            reason='manual_admin_ban',
+            created_by=actor.id if actor else None,
+        )
+        return True
+    except Exception as exc:
+        logger.warning('manual ban capture failed: %s', exc)
+        return False
 
 
 async def apply_user_sanctions_on_join(bot: Bot, chat_id: int, user_id: int) -> bool:

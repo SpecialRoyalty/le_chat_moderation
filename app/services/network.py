@@ -164,19 +164,85 @@ async def group_navigation_link(chat_id: int | None) -> str | None:
     group = await get_group(chat_id)
     if not group:
         return None
+    # Un lien explicitement configuré par l'admin reste prioritaire.
     if group.public_link:
         return group.public_link
+    # Pour un groupe public, le username est le lien principal le plus stable.
     if group.username:
         return f'https://t.me/{group.username.lstrip("@")}'
 
-    # Groupe privé sans lien public : redirection via le bot. Au clic, le bot
-    # vérifie à nouveau quel groupe est actif/sélectionné avant de générer un
-    # lien d'invitation. Un ancien bouton ne peut donc pas ramener vers un
-    # groupe devenu OFF/LOST.
+    # Pour un groupe privé, on conserve automatiquement un lien direct dédié
+    # au réseau. Il est invalidé lorsque le groupe passe OFF/LOST.
+    direct = (await st.group_get_value(group.chat_id, 'network_direct_link', '', inherit_global=False)).strip()
+    if direct:
+        return direct
+
+    # Dernier filet de sécurité : passage par le bot, qui revalide la cible au
+    # moment du clic et génère alors une invitation utilisateur.
     bot_username = (await st.get_value('bot_username', '')).strip().lstrip('@')
     if bot_username:
         return f'https://t.me/{bot_username}?start={group_start_arg(group.chat_id)}'
     return None
+
+
+async def refresh_group_navigation_link(bot: Bot, chat_id: int) -> str | None:
+    """Récupère automatiquement le lien principal/direct d'un groupe.
+
+    - groupe public : username Telegram ;
+    - groupe privé : réutilise le lien principal retourné par ``getChat`` ;
+    - si Telegram n'en expose aucun, crée un lien permanent dédié au réseau
+      sans révoquer le lien principal existant.
+    """
+    group = await get_group(chat_id)
+    if not group or not group.approved:
+        return None
+    try:
+        chat = await bot.get_chat(chat_id, request_timeout=10)
+        username = getattr(chat, 'username', None)
+        if username:
+            async with SessionLocal() as db:
+                row = await db.get(NetworkGroup, chat_id)
+                if row:
+                    row.username = username
+                    row.updated_at = datetime.utcnow()
+                    await db.commit()
+            await st.group_set_value(chat_id, 'network_direct_link', '')
+            return f'https://t.me/{username.lstrip("@")}'
+
+        primary = (getattr(chat, 'invite_link', None) or '').strip()
+        if primary:
+            await st.group_set_value(chat_id, 'network_direct_link', primary)
+            return primary
+
+        existing = (await st.group_get_value(chat_id, 'network_direct_link', '', inherit_global=False)).strip()
+        if existing:
+            return existing
+
+        created = await bot.create_chat_invite_link(
+            chat_id,
+            name='GROSCHAT - accès réseau',
+            request_timeout=10,
+        )
+        link = created.invite_link
+        await st.group_set_value(chat_id, 'network_direct_link', link)
+        return link
+    except Exception as exc:
+        logger.warning('navigation link refresh failed chat=%s: %s', chat_id, exc)
+        return await group_navigation_link(chat_id)
+
+
+async def invalidate_navigation_link(bot: Bot, chat_id: int) -> None:
+    """Oublie et, si possible, révoque le lien direct réseau d'un groupe."""
+    link = (await st.group_get_value(chat_id, 'network_direct_link', '', inherit_global=False)).strip()
+    await st.group_set_value(chat_id, 'network_direct_link', '')
+    if not link:
+        return
+    try:
+        await bot.revoke_chat_invite_link(chat_id, link, request_timeout=10)
+    except Exception:
+        # Un groupe réellement perdu n'est souvent plus joignable. Le lien est
+        # au minimum supprimé de la source de vérité centrale.
+        pass
 
 
 async def _upsert_group_from_chat(chat: Chat, *, approved: bool | None = None, enabled: bool | None = None,
@@ -281,6 +347,9 @@ async def approve_group(bot: Bot, chat_id: int, admin_id: int) -> tuple[bool, st
         await reconcile_group_sanctions(bot, chat_id)
     except Exception:
         logger.exception('sanction reconciliation failed on group approval')
+    # Prépare immédiatement le lien de redirection affiché dans les autres
+    # groupes fermés. Pour un groupe privé, aucun réglage manuel n'est requis.
+    await refresh_group_navigation_link(bot, chat_id)
     return True, f'✅ {row.title or chat_id} ajouté au réseau.'
 
 
@@ -515,6 +584,7 @@ async def mark_group_unavailable(bot: Bot, chat_id: int, *, reason: str, lost: b
         await st.set_value('group_open', 'false')
 
     invalidated, revoked = await invalidate_group_invites(bot, chat_id, f'{status}:{reason}')
+    await invalidate_navigation_link(bot, chat_id)
     replacement = None
     if state.selected_chat_id == chat_id:
         # La cible prévue est elle-même perdue : on choisit un remplaçant sain
@@ -822,6 +892,13 @@ async def bootstrap_network(bot: Bot) -> None:
                     ))
             await db.commit()
         await st.set_value('network_legacy_bans_migrated', 'true')
+
+    # Prépare/récupère le lien direct de tous les groupes déjà approuvés.
+    # Ainsi une migration depuis une version précédente bénéficie immédiatement
+    # des boutons de redirection sans intervention manuelle.
+    for group in await list_groups(approved_only=True, include_removed=False):
+        if group.status not in {STATUS_LOST, STATUS_OFFLINE, STATUS_PENDING, STATUS_REMOVED}:
+            await refresh_group_navigation_link(bot, group.chat_id)
 
 
 async def network_dashboard_text() -> str:

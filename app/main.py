@@ -6,15 +6,15 @@ from aiogram.exceptions import TelegramNetworkError, TelegramServerError
 
 from app.config import get_settings
 from app.db.session import init_db
-from app.services.settings import init_defaults
-from app.services import settings as st
-from app.services.state import ensure_status_message, cleanup_known_status_duplicates
 from app.handlers import admin, callbacks, group
 from app.scheduler import start_scheduler
+from app.services import settings as st
+from app.services.network import bootstrap_network
+from app.services.settings import init_defaults
+from app.services.state import ensure_all_status_messages
 
 
 async def get_me_with_retry(bot: Bot, attempts: int = 10):
-    """Récupère l'identité du bot en tolérant les erreurs temporaires Telegram (5xx/réseau)."""
     delay = 2
     for attempt in range(1, attempts + 1):
         try:
@@ -23,11 +23,8 @@ async def get_me_with_retry(bot: Bot, attempts: int = 10):
             if attempt >= attempts:
                 raise
             logging.warning(
-                "Telegram indisponible au démarrage (tentative %s/%s): %s. Nouvel essai dans %ss.",
-                attempt,
-                attempts,
-                exc,
-                delay,
+                'Telegram indisponible au démarrage (tentative %s/%s): %s. Nouvel essai dans %ss.',
+                attempt, attempts, exc, delay,
             )
             await asyncio.sleep(delay)
             delay = min(delay * 2, 30)
@@ -43,8 +40,15 @@ async def main():
     bot = Bot(s.bot_token)
     try:
         me = await get_me_with_retry(bot)
-        logging.info("Bot Telegram joignable: @%s (id=%s)", me.username, me.id)
-        await st.set_value('bot_id', str(me.id))
+        logging.info('Bot Telegram joignable: @%s (id=%s)', me.username, me.id)
+        await st.set_values({
+            'bot_id': str(me.id),
+            'bot_username': me.username or '',
+        })
+
+        # Importe automatiquement l'ancien MAIN_GROUP_ID s'il existe, puis le
+        # registre réseau devient la source de vérité pour tous les groupes.
+        await bootstrap_network(bot)
 
         dp = Dispatcher()
         dp.include_router(admin.router)
@@ -54,17 +58,12 @@ async def main():
         start_scheduler(bot)
 
         try:
-            await ensure_status_message(bot, s.main_group_id)
-            await cleanup_known_status_duplicates(bot, s.main_group_id)
+            await ensure_all_status_messages(bot)
         except Exception:
-            logging.exception('status init failed')
+            logging.exception('network status init failed')
 
-        await dp.start_polling(
-            bot,
-            allowed_updates=dp.resolve_used_update_types(),
-        )
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        # Évite les "Unclosed client session / connector" si Telegram ou le polling échoue.
         await bot.session.close()
 
 

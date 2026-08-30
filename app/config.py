@@ -12,7 +12,10 @@ class Settings(BaseSettings):
     # Accepted values: empty, comma-separated ('123,456'), JSON-like ('[123,456]').
     admin_ids: str = Field(default='', alias='ADMIN_IDS')
     trusted_ids: str = Field(default='', alias='TRUSTED_IDS')
-    main_group_id: int = Field(alias='MAIN_GROUP_ID')
+    # Héritage facultatif : si renseigné, ce groupe est importé automatiquement
+    # dans le registre réseau au premier démarrage. Les nouveaux groupes sont
+    # ensuite approuvés dynamiquement par un ADMIN_ID.
+    main_group_id: Optional[int] = Field(default=None, alias='MAIN_GROUP_ID')
     log_group_id: Optional[int] = Field(default=None, alias='LOG_GROUP_ID')
     public_bot_username: str = Field(default='', alias='PUBLIC_BOT_USERNAME')
     timezone: str = Field(default='Europe/Paris', alias='TIMEZONE')
@@ -47,7 +50,7 @@ class Settings(BaseSettings):
             return [int(x.strip().strip('\"\'')) for x in raw.split(',') if x.strip().strip('\"\'')]
         return []
 
-    @field_validator('log_group_id', mode='before')
+    @field_validator('main_group_id', 'log_group_id', mode='before')
     @classmethod
     def empty_int(cls, v):
         if v is None or v == '': return None

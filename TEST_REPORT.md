@@ -4,34 +4,31 @@ Date de préparation : 2026-08-30
 
 ## Résultat
 
-`tests/verify_project.py` : **48 contrôles OK / 0 échec**.
+`tests/verify_project.py` : **60 contrôles OK / 0 échec**.
 
 ## Contrôles réalisés
 
 - Compilation syntaxique de l'ensemble de `app/`.
-- Comparaison du préfixe historique de `app/db/models.py` avec la version `GROSCHAT-main-fast-optimized` : **identique**.
-- Vérification explicite de la conservation de `media_hashes_test` et `media_fingerprints_test`.
-- Simulation SQLAlchemy `create_all()` sur une base SQLite créée avec le schéma historique : une ligne hash-ban bannie a été conservée et les nouvelles tables réseau ont été ajoutées.
-- Recherche d'opérations destructives (`DROP TABLE`, `TRUNCATE`, `metadata.drop_all`, suppression massive des tables hash) : aucune trouvée.
-- Vérification que les nouveaux groupes n'héritent jamais des anciens IDs de message/session ; la migration legacy est limitée au bootstrap de `MAIN_GROUP_ID`.
-- Vérification que l'approbation/activation d'un groupe confirme les permissions Telegram avant de le déclarer opérationnel.
-- Vérification de l'invalidation des invitations sur perte de groupe.
-- Vérification du failover et du renouvellement propre du cycle de vote.
-- Vérification de l'exclusivité des ouvertures via lock et fermeture confirmée des autres groupes ON.
-- Vérification de la consommation des votes après ouverture.
-- Vérification que `cp` correspond à un mot isolé mais pas à `jecpquoi`, `cp123`, `123cp`, `moncp`.
-- Vérification des deep-links de groupe privé.
-- Vérification que les sanctions globales sont écrites en PostgreSQL avant les appels Telegram.
-- Vérification que les validations d'invitation sont persistées et qu'un membre parti avant 5 min n'est pas crédité.
-- Vérification de tous les imports locaux `app.*`.
-- Vérification de l'absence des anciens modules VIP/Crowdfunding/Justice.
-- Test du parseur `ADMIN_IDS` / `TRUSTED_IDS` avec valeurs simples, CSV, guillemets et JSON-like.
-- Test de conversion `postgresql://` vers `postgresql+asyncpg://`.
-- Création complète des 21 tables SQLAlchemy dans une base SQLite de test.
-- Vérification séparée : `app/services/hashban.py` est **identique octet pour octet** à la version `GROSCHAT-main-fast-optimized` utilisée comme base.
+- Conservation stricte du schéma historique, dont `media_hashes_test` et `media_fingerprints_test`.
+- Simulation additive de `create_all()` avec conservation d'un ancien hash-ban `banned=True`.
+- Absence de migration destructive (`DROP TABLE`, `TRUNCATE`, `metadata.drop_all`, suppression des blacklists).
+- Approbation sécurisée des groupes et migration legacy limitée au bootstrap.
+- Un seul groupe actif et cycle de vote propre au groupe sélectionné.
+- Invalidation des invitations et failover en cas de perte d'un groupe.
+- Mots isolés (`cp` ne correspond pas à `jecpquoi`, `cp123`, etc.).
+- Sanctions globales persistées avant les appels Telegram.
+- `/pedo` utilise le ban global.
+- Ban manuel Telegram (`kicked`) capturé et propagé à tout le réseau sans boucle avec les bans du bot.
+- Les groupes OFF mais encore joignables reçoivent eux aussi les bans globaux.
+- Un groupe ajouté plus tard réapplique les sanctions historiques lors de son approbation.
+- Une arrivée dans un groupe réapplique immédiatement un ban global encore actif.
+- Nouveau wording de statut sans `MAINTENANCE`.
+- Lien de navigation automatique vers le groupe actif/sélectionné, y compris pour les groupes privés.
+- Lien direct privé invalidé si le groupe devient indisponible.
+- Validation des invitations persistante et contrôle de présence après 5 minutes.
+- Tous les imports locaux `app.*` existent.
+- Absence des anciens modules VIP/Crowdfunding/Justice.
 
 ## Limite des tests locaux
 
-L'environnement de préparation n'a pas accès au Bot API Telegram ni à la base Railway de production et ne contient pas le package `aiogram`. Il n'est donc pas possible d'exécuter ici un test live de polling, de permissions Telegram, d'invitation réelle ou de connexion PostgreSQL Railway.
-
-Ces points ont été protégés par des garde-fous dans le code et doivent être validés par le smoke-test de déploiement décrit dans `MIGRATION.md` avant la première vraie session.
+Les appels réels au Bot API Telegram et à la PostgreSQL Railway de production ne sont pas reproduits localement. Les chemins réseau disposent néanmoins de timeouts, persistance DB et mécanismes de réconciliation. Un smoke-test Telegram réel reste recommandé avant une vraie session.

@@ -93,3 +93,13 @@ L'activation (`ON`) confirme aussi que le bot peut réellement maintenir le grou
 Le dossier `tests/verify_project.py` effectue des contrôles statiques/non destructifs : compilation Python, compatibilité des anciennes tables, conservation des tables de hash-ban, absence de migration destructive, logique d'isolation des mots, deep-links groupe et garde-fous réseau.
 
 Ces tests ne remplacent pas un essai réel Telegram/Railway : les appels Bot API et PostgreSQL live nécessitent les identifiants et le réseau de production.
+
+## Ban manuel global + redirection réseau
+
+- Un membre banni avec `/pedo` est enregistré comme ban global puis banni dans tous les groupes approuvés, même s'il n'y est pas encore membre.
+- Un ban effectué manuellement par un administrateur depuis l'interface Telegram (`chat_member -> kicked`) est également converti en ban global. Les updates produites par le bot lui-même sont ignorées pour éviter les boucles.
+- Si un groupe était hors ligne au moment du ban, la sanction reste en PostgreSQL et est réappliquée à son retour ou à l'arrivée de l'utilisateur.
+- Lorsqu'un nouveau groupe est approuvé, toutes les sanctions globales actives sont réconciliées avant son utilisation.
+- Les anciens messages `MAINTENANCE` sont remplacés par des messages `CE GROUPE EST EN PAUSE` / `PROCHAINE SESSION`.
+- Le bouton de redirection utilise automatiquement le lien public du groupe, son lien principal Telegram lorsqu'il est disponible, ou un lien direct réseau créé par le bot pour un groupe privé. Aucun réglage manuel n'est nécessaire dans le cas normal.
+- Le lien direct réseau privé est invalidé lorsque le groupe devient indisponible ou est désactivé.

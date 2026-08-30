@@ -139,3 +139,100 @@ class Advertisement(Base):
     button_url: Mapped[str|None]=mapped_column(Text, nullable=True)
     active: Mapped[bool]=mapped_column(Boolean, default=True)
     created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+
+# ---------------------------------------------------------------------------
+# Réseau multi-groupes centralisé
+# ---------------------------------------------------------------------------
+class NetworkGroup(Base):
+    __tablename__='network_groups_test'
+    chat_id: Mapped[int]=mapped_column(BigInteger, primary_key=True)
+    title: Mapped[str]=mapped_column(String(512), default='')
+    username: Mapped[str|None]=mapped_column(String(255), nullable=True)
+    public_link: Mapped[str|None]=mapped_column(Text, nullable=True)
+    approved: Mapped[bool]=mapped_column(Boolean, default=False, index=True)
+    enabled: Mapped[bool]=mapped_column(Boolean, default=False, index=True)
+    status: Mapped[str]=mapped_column(String(30), default='pending', index=True)
+    priority: Mapped[int]=mapped_column(Integer, default=100, index=True)
+    approved_by: Mapped[int|None]=mapped_column(BigInteger, nullable=True)
+    approved_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
+    last_seen_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    last_health_check_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
+    failure_count: Mapped[int]=mapped_column(Integer, default=0)
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class NetworkState(Base):
+    __tablename__='network_state_test'
+    id: Mapped[int]=mapped_column(Integer, primary_key=True, default=1)
+    active_chat_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True)
+    selected_chat_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True)
+    fallback_chat_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True)
+    failover_auto: Mapped[bool]=mapped_column(Boolean, default=True)
+    updated_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class NetworkMembership(Base):
+    __tablename__='network_memberships_test'
+    user_id: Mapped[int]=mapped_column(BigInteger, primary_key=True)
+    chat_id: Mapped[int]=mapped_column(BigInteger, primary_key=True)
+    status: Mapped[str]=mapped_column(String(30), default='member', index=True)
+    joined_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    left_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
+    known_before_join: Mapped[bool]=mapped_column(Boolean, default=False)
+    migration_exempt_until: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
+    last_seen_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+
+class GroupInviteLink(Base):
+    __tablename__='group_invite_links_test'
+    id: Mapped[int]=mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_id: Mapped[int]=mapped_column(BigInteger, index=True)
+    group_chat_id: Mapped[int]=mapped_column(BigInteger, index=True)
+    link: Mapped[str]=mapped_column(Text, default='')
+    active: Mapped[bool]=mapped_column(Boolean, default=True, index=True)
+    valid_count: Mapped[int]=mapped_column(Integer, default=0)
+    suspect_count: Mapped[int]=mapped_column(Integer, default=0)
+    banned_count: Mapped[int]=mapped_column(Integer, default=0)
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    revoked_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
+    revoked_reason: Mapped[str|None]=mapped_column(String(255), nullable=True)
+    __table_args__=(Index('ix_group_invite_owner_active_test','owner_id','group_chat_id','active'),)
+
+class PendingInviteValidation(Base):
+    __tablename__='pending_invite_validations_test'
+    user_id: Mapped[int]=mapped_column(BigInteger, primary_key=True)
+    chat_id: Mapped[int]=mapped_column(BigInteger, primary_key=True)
+    owner_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True, index=True)
+    group_invite_link_id: Mapped[int|None]=mapped_column(Integer, nullable=True, index=True)
+    joined_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+class GroupWordRule(Base):
+    __tablename__='group_word_rules_test'
+    id: Mapped[int]=mapped_column(Integer, primary_key=True, autoincrement=True)
+    group_chat_id: Mapped[int]=mapped_column(BigInteger, index=True)
+    kind: Mapped[str]=mapped_column(String(30), index=True)
+    word: Mapped[str]=mapped_column(String(255), index=True)
+    enabled: Mapped[bool]=mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__=(Index('ix_group_word_lookup_test','group_chat_id','kind','enabled'),)
+
+class GlobalSanction(Base):
+    __tablename__='global_sanctions_test'
+    id: Mapped[int]=mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int]=mapped_column(BigInteger, index=True)
+    sanction_type: Mapped[str]=mapped_column(String(30), index=True)  # ban/restrict
+    reason: Mapped[str]=mapped_column(String(100), default='moderation')
+    source_chat_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True)
+    created_by: Mapped[int|None]=mapped_column(BigInteger, nullable=True)
+    until_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
+    active: Mapped[bool]=mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__=(Index('ix_global_sanction_user_active_test','user_id','active'),)
+
+class NetworkEvent(Base):
+    __tablename__='network_events_test'
+    id: Mapped[int]=mapped_column(Integer, primary_key=True, autoincrement=True)
+    action: Mapped[str]=mapped_column(String(80), index=True)
+    chat_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True, index=True)
+    user_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True)
+    admin_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True)
+    details: Mapped[str]=mapped_column(Text, default='')
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow, index=True)

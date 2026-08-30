@@ -1,67 +1,65 @@
-from sqlalchemy import select, func
+from __future__ import annotations
+
+from sqlalchemy import func, select
 from aiogram import Bot
-from app.config import get_settings
+
+from app.db.models import Advertisement, ErrorLog, MediaFingerprint, MediaHash, TrackedMessage, User
 from app.db.session import SessionLocal
-from app.db.models import ErrorLog, TrackedMessage, User, MediaHash, Advertisement
 from app.services import settings as st
-from app.utils.time import slot_times, next_open_text, next_status_update_text
+from app.services.network import active_chat_id, get_network_state, group_display_name, list_groups, selected_chat_id
 
-async def health_text(bot:Bot):
-    s=get_settings(); slot=await st.time_slot(); start,end=slot_times(slot,s.timezone)
-    groups=[('Principal',s.main_group_id),('Logs',s.log_group_id)]
-    group_lines=[]; missing=[]
-    for name,gid in groups:
-        if not gid:
-            if name != 'Logs':
-                missing.append(name)
-            group_lines.append(f'{name}: non configuré')
-            continue
-        try:
-            me=await bot.get_me(); member=await bot.get_chat_member(gid,me.id)
-            group_lines.append(f'{name}: OK ({member.status})')
-        except Exception:
-            group_lines.append(f'{name}: ERREUR')
-            missing.append(name)
+
+async def health_text(bot: Bot):
+    groups = await list_groups(include_removed=False)
+    active = await active_chat_id()
+    selected = await selected_chat_id()
+    state = await get_network_state()
+
+    group_lines = []
+    for group in groups:
+        marker = '🟢' if group.chat_id == active else ('🗳️' if group.chat_id == selected else '▫️')
+        group_lines.append(
+            f'{marker} {group.title or group.chat_id}: {group.status.upper()} / {"ON" if group.enabled else "OFF"} '
+            f'(échecs santé: {group.failure_count})'
+        )
+    if not group_lines:
+        group_lines = ['Aucun groupe approuvé.']
+
     async with SessionLocal() as db:
-        errors=(await db.execute(select(func.count(ErrorLog.id)))).scalar() or 0
-        tracked=(await db.execute(select(func.count(TrackedMessage.id)).where(TrackedMessage.deleted==False))).scalar() or 0
-        suspects=(await db.execute(select(func.count(User.id)).where(User.suspect_score>=50))).scalar() or 0
-        media_known=(await db.execute(select(func.count(MediaHash.id)))).scalar() or 0
-        ads_total=(await db.execute(select(func.count(Advertisement.id)))).scalar() or 0
-        ads_active=(await db.execute(select(func.count(Advertisement.id)).where(Advertisement.active==True))).scalar() or 0
-    mode='🟢 Fonctionnement total' if not missing else '🟡 Fonctionnement partiel sans modules manquants'
-    ads_enabled='ON' if (await st.get_value('ads_enabled','true'))=='true' else 'OFF'
-    repost_enabled='ON' if (await st.get_value('repost_enabled','false'))=='true' else 'OFF'
-    return f'''{mode}
+        errors = (await db.execute(select(func.count(ErrorLog.id)))).scalar() or 0
+        tracked = (await db.execute(select(func.count(TrackedMessage.id)).where(TrackedMessage.deleted.is_(False)))).scalar() or 0
+        suspects = (await db.execute(select(func.count(User.id)).where(User.suspect_score >= 50))).scalar() or 0
+        media_known = (await db.execute(select(func.count(MediaHash.id)))).scalar() or 0
+        media_banned = (await db.execute(select(func.count(MediaHash.id)).where(MediaHash.banned.is_(True)))).scalar() or 0
+        fingerprints_banned = (await db.execute(select(func.count(MediaFingerprint.id)).where(MediaFingerprint.banned.is_(True)))).scalar() or 0
+        ads_total = (await db.execute(select(func.count(Advertisement.id)))).scalar() or 0
+        ads_active = (await db.execute(select(func.count(Advertisement.id)).where(Advertisement.active.is_(True)))).scalar() or 0
 
-Bot: OK
-PostgreSQL: OK
-Scheduler: OK
+    target = active or selected
+    if target:
+        repost = 'ON' if await st.group_bool(target, 'repost_enabled', False) else 'OFF'
+        ads = 'ON' if await st.group_bool(target, 'ads_enabled', True) else 'OFF'
+        slot = await st.group_time_slot(target)
+        goal = await st.group_vote_goal(target)
+    else:
+        repost = ads = '-'
+        slot = '-'
+        goal = 0
 
-Session:
-Auto: {'ON' if await st.auto_enabled() else 'OFF'}
-Ouvert: {'OUI' if await st.is_open() else 'NON'}
-Créneau: {slot}
-Prochaine ouverture: {next_open_text(slot,s.timezone)}
-Prochaine mise à jour statut: {next_status_update_text(slot,s.timezone)}
-Dernière mise à jour statut: {await st.get_value('last_status_update_at','jamais')}
-Prochaine fermeture: {end.strftime('%H:%M')}
-
-Groupes:
-{chr(10).join(group_lines)}
-
-Contrôles:
-Messages suivis non supprimés: {tracked}
-Comptes suspects: {suspects}
-Médias connus: {media_known}
-Anti-repost: {repost_enabled}
-Dernier repost bloqué: {await st.get_value('last_repost_blocked_at','jamais')}
-Publicités automatiques: {ads_enabled}
-Publicités configurées: {ads_active} actives / {ads_total} total
-Erreurs loggées: {errors}
-
-Diffusions planifiées:
-Publicité — dernier envoi: {await st.get_value('last_ad_sent_at','jamais')} — prochain: automatique pendant ouverture si ON
-Règles — dernier envoi: {await st.get_value('last_rules_sent_at','jamais')} — prochain: toutes les 30 min si ouvert
-Top inviteurs — dernier envoi: {await st.get_value('last_top_sent_at','jamais')}
-'''
+    return (
+        '🟢 SANTÉ RÉSEAU\n\n'
+        'Bot: OK\nPostgreSQL: OK\nScheduler: OK\n\n'
+        f'🟢 Groupe actif : {await group_display_name(active) if active else "aucun"}\n'
+        f'🗳️ Groupe sélectionné : {await group_display_name(selected) if selected else "aucun"}\n'
+        f'🛟 Secours : {await group_display_name(state.fallback_chat_id) if state.fallback_chat_id else "automatique"}\n'
+        f'Failover : {"ON" if state.failover_auto else "OFF"}\n'
+        f'Auto : {"ON" if await st.auto_enabled() else "OFF"}\n'
+        f'Créneau cible : {slot}\nObjectif cible : {goal}\n\n'
+        'Groupes:\n' + '\n'.join(group_lines) + '\n\n'
+        f'Messages suivis non supprimés : {tracked}\n'
+        f'Comptes suspects : {suspects}\nMédias connus : {media_known}\n'
+        f'Anti-repost groupe cible : {repost}\nPublicités groupe cible : {ads}\n'
+        f'Publicités configurées : {ads_active} actives / {ads_total} total\n'
+        f'Erreurs loggées : {errors}\n\n'
+        'ℹ️ Un timeout Telegram ne marque jamais un groupe comme sauté. Les pertes fortes sont détectées via le statut du bot ou confirmées manuellement.'
+    )

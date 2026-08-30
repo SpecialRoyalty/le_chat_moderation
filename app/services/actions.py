@@ -122,7 +122,7 @@ async def trusted_command(bot: Bot, msg: Message):
 
     if cmd in ('/mineur', '/pasfr'):
         # Suppression immédiate; restriction lancée en parallèle avec la suppression de la commande.
-        await asyncio.gather(command_delete_task, delete(bot, target), restrict(bot, msg.chat.id, target_uid, 1))
+        await asyncio.gather(command_delete_task, delete(bot, target), restrict(bot, msg.chat.id, target_uid, 1, reason=cmd.lstrip('/'), created_by=msg.from_user.id))
         await _log_action(msg, cmd, target)
         return True
 
@@ -132,7 +132,7 @@ async def trusted_command(bot: Bot, msg: Message):
 
         # Priorité absolue à la modération visible : ban + suppression du média ciblé + commande.
         # Le hashing perceptuel (potentiellement lourd) vient ENSUITE.
-        await asyncio.gather(command_delete_task, delete(bot, target), ban(bot, msg.chat.id, uid))
+        await asyncio.gather(command_delete_task, delete(bot, target), ban(bot, msg.chat.id, uid, reason='pedo', created_by=msg.from_user.id))
 
         report = await ban_hashes_from_messages(album, bot)
 
@@ -141,25 +141,32 @@ async def trusted_command(bot: Bot, msg: Message):
         async with SessionLocal() as db:
             await db.execute(update(MediaHash).where(MediaHash.user_id == uid).values(banned=True))
             await db.execute(update(MediaFingerprint).where(MediaFingerprint.user_id == uid).values(banned=True))
-            tracked_ids = list((await db.execute(select(TrackedMessage.message_id).where(
-                TrackedMessage.chat_id == msg.chat.id,
+            tracked_rows = list((await db.execute(select(
+                TrackedMessage.id, TrackedMessage.chat_id, TrackedMessage.message_id
+            ).where(
                 TrackedMessage.user_id == uid,
                 TrackedMessage.deleted.is_(False),
-            ))).scalars().all())
+            ))).all())
             await db.commit()
 
-        results = await _delete_many(bot, msg.chat.id, tracked_ids, 8)
-        deleted_ids = [mid for mid, ok in zip(tracked_ids, results) if ok]
+        # Nettoyage des messages suivis dans TOUS les groupes du réseau. Le ban
+        # global a déjà été appliqué, cette phase peut donc prendre un peu plus de temps.
+        sem = asyncio.Semaphore(8)
+        async def remove_row(row):
+            async with sem:
+                try:
+                    await bot.delete_message(row.chat_id, row.message_id)
+                    return row.id
+                except TelegramBadRequest as exc:
+                    if 'message to delete not found' in str(exc).lower():
+                        return row.id
+                    return None
+                except Exception:
+                    return None
+        deleted_ids = [x for x in await asyncio.gather(*(remove_row(r) for r in tracked_rows)) if x]
         if deleted_ids:
             async with SessionLocal() as db:
-                await db.execute(
-                    update(TrackedMessage)
-                    .where(
-                        TrackedMessage.chat_id == msg.chat.id,
-                        TrackedMessage.message_id.in_(deleted_ids),
-                    )
-                    .values(deleted=True)
-                )
+                await db.execute(update(TrackedMessage).where(TrackedMessage.id.in_(deleted_ids)).values(deleted=True))
                 await db.commit()
 
         await _log_action(msg, cmd, target)

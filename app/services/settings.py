@@ -122,14 +122,6 @@ async def init_defaults():
         _CACHE[key] = (value, now)
 
 
-async def is_open():
-    return (await get_value('group_open', 'false')) == 'true'
-
-
-async def set_open(v: bool):
-    await set_value('group_open', 'true' if v else 'false')
-
-
 async def auto_enabled():
     return (await get_value('auto_enabled', 'true')) == 'true'
 
@@ -140,3 +132,61 @@ async def time_slot():
 
 async def vote_goal():
     return int(await get_value('vote_goal', str(get_settings().default_vote_goal)))
+
+# ---------------------------------------------------------------------------
+# Réglages scoppés par groupe (héritage global si aucune valeur locale)
+# ---------------------------------------------------------------------------
+def group_key(chat_id: int, key: str) -> str:
+    return f'group:{int(chat_id)}:{key}'
+
+
+async def group_get_value(chat_id: int, key: str, default: str = '', *, inherit_global: bool = True) -> str:
+    sentinel = '__GROSCHAT_MISSING__'
+    value = await get_value(group_key(chat_id, key), sentinel)
+    if value != sentinel:
+        return value
+    if inherit_global:
+        return await get_value(key, default)
+    return default
+
+
+async def group_set_value(chat_id: int, key: str, value: str) -> None:
+    await set_value(group_key(chat_id, key), value)
+
+
+async def group_set_values(chat_id: int, values: dict[str, str]) -> None:
+    await set_values({group_key(chat_id, key): value for key, value in values.items()})
+
+
+async def group_bool(chat_id: int, key: str, default: bool) -> bool:
+    raw = await group_get_value(chat_id, key, 'true' if default else 'false')
+    return raw == 'true'
+
+
+async def group_vote_goal(chat_id: int) -> int:
+    return int(await group_get_value(chat_id, 'vote_goal', str(get_settings().default_vote_goal)))
+
+
+async def group_time_slot(chat_id: int) -> str:
+    return await group_get_value(chat_id, 'time_slot', get_settings().default_time_slot)
+
+
+async def group_rules_text(chat_id: int) -> str:
+    global_text = await get_value('rules_text', 'Respectez les règles.')
+    local_text = await group_get_value(chat_id, 'rules_text_local', '', inherit_global=False)
+    if local_text.strip():
+        return f'{global_text.strip()}\n\n📍 Règles spécifiques à ce groupe\n{local_text.strip()}'
+    return global_text
+
+
+async def is_open(chat_id: int | None = None):
+    # La source de vérité est désormais network_state_test.
+    from app.services.network import active_chat_id
+    active = await active_chat_id()
+    return bool(active and (chat_id is None or int(chat_id) == int(active)))
+
+
+async def set_open(v: bool):
+    # Compatibilité avec d'anciens appels. L'ouverture réelle passe par
+    # session_ops.set_group_open().
+    await set_value('group_open', 'true' if v else 'false')

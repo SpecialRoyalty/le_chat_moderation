@@ -6,17 +6,19 @@ import time
 import unicodedata
 from datetime import datetime, timedelta
 
-from sqlalchemy import select, update
 from aiogram import Bot
 from aiogram.types import Message
+from sqlalchemy import select, update
 
 from app.config import get_settings
+from app.db.models import GroupWordRule, MediaHash, RecentJoin, User, WordRule
 from app.db.session import SessionLocal
-from app.db.models import WordRule, MediaHash, User, RecentJoin
-from app.services.users import protected, display_name
-from app.services.state import track, log_error
-from app.services.hashban import contains_banned_hash, media_file_entries
 from app.services import settings as st
+from app.services.hashban import contains_banned_hash, media_file_entries
+from app.services.network import is_approved_group, migration_exempt
+from app.services.sanctions import ban_global, restrict_global
+from app.services.state import log_error, track
+from app.services.users import display_name, protected
 
 
 def has_link(text: str):
@@ -48,75 +50,80 @@ def _normalise_rule_text(value: str) -> str:
 
 
 def _isolated_rule_pattern(rule: str) -> re.Pattern[str] | None:
-    """Recherche un mot/expression isolé(e), jamais une sous-chaîne.
-
-    Exemple : ``cp`` correspond à ``cp``, ``cp!`` et ``je_cp_quoi``, mais pas
-    à ``jecpquoi``, ``cp123`` ou ``123cp``.
-    """
     normalised = _normalise_rule_text(rule).strip()
     if not normalised:
         return None
     parts = [re.escape(part) for part in normalised.split()]
     body = r'\s+'.join(parts)
+    # _ est traité comme séparateur volontairement : cp correspond à je_cp_quoi,
+    # mais jamais à jecpquoi / cp123 / 123cp.
     return re.compile(rf'(?<![^\W_]){body}(?![^\W_])', re.UNICODE)
 
 
-# Les listes de mots changeant rarement, les recharger depuis PostgreSQL pour
-# chaque message était un coût important. On charge les 3 listes en une fois et
-# on garde directement les regex compilées.
 _RULE_CACHE_TTL_SECONDS = 30.0
 _RULE_CACHE_EXPIRES = 0.0
-_RULE_PATTERN_CACHE: dict[str, list[re.Pattern[str]]] = {}
+_GLOBAL_RULES: dict[str, list[re.Pattern[str]]] = {}
+_GROUP_RULES: dict[tuple[int, str], list[re.Pattern[str]]] = {}
 _RULE_CACHE_LOCK = asyncio.Lock()
 
 
 def invalidate_word_cache(kind: str | None = None) -> None:
     global _RULE_CACHE_EXPIRES
-    if kind is None:
-        _RULE_PATTERN_CACHE.clear()
-    else:
-        _RULE_PATTERN_CACHE.pop(kind, None)
+    _GLOBAL_RULES.clear()
+    _GROUP_RULES.clear()
     _RULE_CACHE_EXPIRES = 0.0
 
 
 async def _ensure_rule_cache() -> None:
-    global _RULE_CACHE_EXPIRES, _RULE_PATTERN_CACHE
+    global _RULE_CACHE_EXPIRES, _GLOBAL_RULES, _GROUP_RULES
     now = time.monotonic()
-    if _RULE_PATTERN_CACHE and now < _RULE_CACHE_EXPIRES:
+    if (_GLOBAL_RULES or _GROUP_RULES) and now < _RULE_CACHE_EXPIRES:
         return
     async with _RULE_CACHE_LOCK:
         now = time.monotonic()
-        if _RULE_PATTERN_CACHE and now < _RULE_CACHE_EXPIRES:
+        if (_GLOBAL_RULES or _GROUP_RULES) and now < _RULE_CACHE_EXPIRES:
             return
         async with SessionLocal() as db:
-            rows = list((await db.execute(select(WordRule))).scalars().all())
-        compiled: dict[str, list[re.Pattern[str]]] = {'ban': [], 'forbidden': [], 'nameban': []}
-        for row in rows:
+            global_rows = list((await db.execute(select(WordRule))).scalars().all())
+            local_rows = list((await db.execute(select(GroupWordRule).where(GroupWordRule.enabled.is_(True)))).scalars().all())
+        globals_: dict[str, list[re.Pattern[str]]] = {'ban': [], 'forbidden': [], 'nameban': []}
+        locals_: dict[tuple[int, str], list[re.Pattern[str]]] = {}
+        for row in global_rows:
             pattern = _isolated_rule_pattern(row.word)
             if pattern:
-                compiled.setdefault(row.kind, []).append(pattern)
-        _RULE_PATTERN_CACHE = compiled
+                globals_.setdefault(row.kind, []).append(pattern)
+        for row in local_rows:
+            pattern = _isolated_rule_pattern(row.word)
+            if pattern:
+                locals_.setdefault((row.group_chat_id, row.kind), []).append(pattern)
+        _GLOBAL_RULES = globals_
+        _GROUP_RULES = locals_
         _RULE_CACHE_EXPIRES = now + _RULE_CACHE_TTL_SECONDS
 
 
-async def words(kind):
-    """Compatibilité : retourne les règles brutes du type demandé."""
+async def words(kind, chat_id: int | None = None):
     async with SessionLocal() as db:
-        res = await db.execute(select(WordRule.word).where(WordRule.kind == kind))
-        return [str(x).lower() for x in res.scalars().all()]
+        values = list((await db.execute(select(WordRule.word).where(WordRule.kind == kind))).scalars().all())
+        if chat_id is not None:
+            values += list((await db.execute(select(GroupWordRule.word).where(
+                GroupWordRule.group_chat_id == chat_id,
+                GroupWordRule.kind == kind,
+                GroupWordRule.enabled.is_(True),
+            ))).scalars().all())
+        return [str(x).lower() for x in values]
 
 
-async def text_has_word(kind, text):
+async def text_has_word(kind, text, chat_id: int | None = None):
     value = _normalise_rule_text(text)
     if not value:
         return False
     await _ensure_rule_cache()
-    return any(pattern.search(value) for pattern in _RULE_PATTERN_CACHE.get(kind, ()))
+    patterns = list(_GLOBAL_RULES.get(kind, ()))
+    if chat_id is not None:
+        patterns += list(_GROUP_RULES.get((chat_id, kind), ()))
+    return any(pattern.search(value) for pattern in patterns)
 
 
-# Cache de l'heure d'arrivée. La base reste la source de vérité après un
-# redémarrage, mais une fois un utilisateur vu on n'interroge plus PostgreSQL à
-# chaque média.
 _RECENT_JOIN_CACHE: dict[tuple[int, int], datetime | None] = {}
 _USER_HAS_MEDIA_CACHE: dict[int, bool] = {}
 
@@ -126,6 +133,8 @@ def remember_recent_join(user_id: int, chat_id: int, joined_at: datetime | None 
 
 
 async def _joined_within(user_id: int, chat_id: int, seconds: int) -> bool:
+    if await migration_exempt(user_id, chat_id):
+        return False
     key = (user_id, chat_id)
     if key not in _RECENT_JOIN_CACHE:
         async with SessionLocal() as db:
@@ -140,50 +149,39 @@ async def _user_has_media(user_id: int) -> bool:
     if cached is not None:
         return cached
     async with SessionLocal() as db:
-        media_count = (await db.execute(
-            select(User.media_count).where(User.id == user_id)
-        )).scalar_one_or_none()
+        media_count = (await db.execute(select(User.media_count).where(User.id == user_id))).scalar_one_or_none()
     has_media = bool(media_count and media_count > 0)
     _USER_HAS_MEDIA_CACHE[user_id] = has_media
     return has_media
 
 
 async def _store_metrics(**values: str) -> None:
-    """Les métriques de santé ne doivent jamais ralentir une sanction."""
     try:
         await st.set_values(values)
     except Exception as exc:
         await log_error('moderation_metrics', exc)
 
 
-async def restrict(bot: Bot, chat_id: int, user_id: int, days: int):
+async def restrict(bot: Bot, chat_id: int, user_id: int, days: int, *, reason: str = 'moderation', created_by: int | None = None):
     if await protected(user_id):
         return
-    until = datetime.utcnow() + timedelta(days=days)
-    try:
-        await bot.restrict_chat_member(
-            chat_id,
-            user_id,
-            permissions={'can_send_messages': False},
-            until_date=until,
-        )
-        async with SessionLocal() as db:
-            await db.execute(update(User).where(User.id == user_id).values(is_restricted=True))
-            await db.commit()
-    except Exception as exc:
-        await log_error('restrict', exc)
+    return await restrict_global(
+        bot, user_id, days,
+        source_chat_id=chat_id,
+        reason=reason,
+        created_by=created_by,
+    )
 
 
-async def ban(bot: Bot, chat_id: int, user_id: int):
+async def ban(bot: Bot, chat_id: int, user_id: int, *, reason: str = 'moderation', created_by: int | None = None):
     if await protected(user_id):
         return
-    try:
-        await bot.ban_chat_member(chat_id, user_id)
-        async with SessionLocal() as db:
-            await db.execute(update(User).where(User.id == user_id).values(is_banned=True))
-            await db.commit()
-    except Exception as exc:
-        await log_error('ban', exc)
+    return await ban_global(
+        bot, user_id,
+        source_chat_id=chat_id,
+        reason=reason,
+        created_by=created_by,
+    )
 
 
 async def delete(bot: Bot, msg: Message):
@@ -197,12 +195,10 @@ async def record_media(msg: Message, banned=False):
     entries = file_ids(msg)
     if not entries:
         return
-    sid = int(await st.get_value('active_session_id', '0') or '0')
+    sid = int(await st.group_get_value(msg.chat.id, 'active_session_id', '0', inherit_global=False) or '0')
     async with SessionLocal() as db:
         for unique, file_id, media_type in entries:
-            rows = list((await db.execute(
-                select(MediaHash).where(MediaHash.file_unique_id == unique)
-            )).scalars().all())
+            rows = list((await db.execute(select(MediaHash).where(MediaHash.file_unique_id == unique))).scalars().all())
             if rows:
                 for row in rows:
                     if banned:
@@ -220,14 +216,10 @@ async def record_media(msg: Message, banned=False):
                     banned=banned,
                 ))
             if msg.from_user and not banned:
-                await db.execute(
-                    update(User)
-                    .where(User.id == msg.from_user.id)
-                    .values(
-                        media_count=User.media_count + 1,
-                        last_media_session=sid,
-                    )
-                )
+                await db.execute(update(User).where(User.id == msg.from_user.id).values(
+                    media_count=User.media_count + 1,
+                    last_media_session=sid,
+                ))
         await db.commit()
     if msg.from_user and not banned:
         _USER_HAS_MEDIA_CACHE[msg.from_user.id] = True
@@ -238,23 +230,18 @@ async def contains_known_media(msg: Message):
     if not ids:
         return False
     async with SessionLocal() as db:
-        return (await db.execute(
-            select(MediaHash.id)
-            .where(MediaHash.file_unique_id.in_(ids))
-            .limit(1)
-        )).scalar_one_or_none() is not None
+        return (await db.execute(select(MediaHash.id).where(
+            MediaHash.file_unique_id.in_(ids),
+        ).limit(1))).scalar_one_or_none() is not None
 
 
 async def moderate_message(bot: Bot, msg: Message) -> bool:
-    """Retourne False dès que le message est bloqué."""
     if not msg.from_user:
         return True
+    if not await is_approved_group(msg.chat.id):
+        return False
 
     s = get_settings()
-    # Aucun traitement/écriture inutile pour les autres chats autorisés au bot.
-    if msg.chat.id != s.main_group_id:
-        return True
-
     uid = msg.from_user.id
     media = is_media(msg)
     await track(msg.chat.id, msg.message_id, uid, 'message', media)
@@ -264,20 +251,26 @@ async def moderate_message(bot: Bot, msg: Message) -> bool:
     admin = uid in s.admin_id_set
 
     if is_story(msg):
-        await asyncio.gather(delete(bot, msg), ban(bot, msg.chat.id, uid))
+        await asyncio.gather(
+            delete(bot, msg),
+            ban(bot, msg.chat.id, uid, reason='story', created_by=uid if admin else None),
+        )
         asyncio.create_task(_store_metrics(
             last_story_ban_user=str(uid),
             last_story_ban_at=datetime.utcnow().isoformat(timespec='seconds'),
         ))
         return False
 
-    if not await st.is_open() and not (trusted or admin):
+    if not await st.is_open(msg.chat.id) and not (trusted or admin):
         await delete(bot, msg)
         return False
 
     if media:
         if await _joined_within(uid, msg.chat.id, 60):
-            await asyncio.gather(delete(bot, msg), ban(bot, msg.chat.id, uid))
+            await asyncio.gather(
+                delete(bot, msg),
+                ban(bot, msg.chat.id, uid, reason='media_under_60s'),
+            )
             asyncio.create_task(_store_metrics(
                 last_fast_media_ban_user=str(uid),
                 last_fast_media_ban_at=datetime.utcnow().isoformat(timespec='seconds'),
@@ -286,7 +279,10 @@ async def moderate_message(bot: Bot, msg: Message) -> bool:
 
         blocked, details = await contains_banned_hash(bot, msg)
         if blocked:
-            await asyncio.gather(delete(bot, msg), ban(bot, msg.chat.id, uid))
+            await asyncio.gather(
+                delete(bot, msg),
+                ban(bot, msg.chat.id, uid, reason='hashban'),
+            )
             asyncio.create_task(_store_metrics(
                 last_hashban_method=str(details.get('method', 'unknown')),
                 last_hashban_user=str(uid),
@@ -294,7 +290,7 @@ async def moderate_message(bot: Bot, msg: Message) -> bool:
             ))
             return False
 
-        if (await st.get_value('repost_enabled', 'false')) == 'true' and await contains_known_media(msg):
+        if await st.group_bool(msg.chat.id, 'repost_enabled', False) and await contains_known_media(msg):
             await delete(bot, msg)
             asyncio.create_task(_store_metrics(
                 last_repost_blocked_at=datetime.utcnow().isoformat(timespec='seconds'),
@@ -312,31 +308,28 @@ async def moderate_message(bot: Bot, msg: Message) -> bool:
         if trusted or admin:
             await delete(bot, msg)
         else:
-            await asyncio.gather(delete(bot, msg), ban(bot, msg.chat.id, uid))
+            await asyncio.gather(delete(bot, msg), ban(bot, msg.chat.id, uid, reason='link'))
         return False
     if trusted or admin:
         return True
     if has_command(text):
-        await asyncio.gather(delete(bot, msg), restrict(bot, msg.chat.id, uid, 1))
+        await asyncio.gather(delete(bot, msg), restrict(bot, msg.chat.id, uid, 1, reason='command'))
         return False
     if msg.video_note:
-        await asyncio.gather(delete(bot, msg), restrict(bot, msg.chat.id, uid, 1))
+        await asyncio.gather(delete(bot, msg), restrict(bot, msg.chat.id, uid, 1, reason='video_note'))
         return False
     if has_mention(text):
-        await asyncio.gather(delete(bot, msg), restrict(bot, msg.chat.id, uid, 2))
+        await asyncio.gather(delete(bot, msg), restrict(bot, msg.chat.id, uid, 2, reason='mention'))
         return False
-    if await text_has_word('ban', text):
-        await asyncio.gather(delete(bot, msg), ban(bot, msg.chat.id, uid))
+    if await text_has_word('ban', text, msg.chat.id):
+        await asyncio.gather(delete(bot, msg), ban(bot, msg.chat.id, uid, reason='ban_word'))
         return False
-    if await text_has_word('forbidden', text):
-        await asyncio.gather(delete(bot, msg), restrict(bot, msg.chat.id, uid, 1))
+    if await text_has_word('forbidden', text, msg.chat.id):
+        await asyncio.gather(delete(bot, msg), restrict(bot, msg.chat.id, uid, 1, reason='forbidden_word'))
         return False
     if text and not media and not await _user_has_media(uid):
         await delete(bot, msg)
-        warn = await bot.send_message(
-            msg.chat.id,
-            f'{display_name(msg.from_user)}, envoie d’abord un média avant d’écrire.',
-        )
+        warn = await bot.send_message(msg.chat.id, f'{display_name(msg.from_user)}, envoie d’abord un média avant d’écrire.')
         await track(msg.chat.id, warn.message_id, None, 'temp', False)
         return False
     return True

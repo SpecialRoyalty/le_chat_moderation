@@ -62,6 +62,7 @@ from app.services.network import (
     group_display_name,
     group_health_check,
     invalidate_group_invites,
+    invalidate_navigation_link,
     list_groups,
     mark_group_unavailable,
     network_dashboard_text,
@@ -71,6 +72,7 @@ from app.services.network import (
     set_fallback_group,
     set_group_enabled,
     set_group_public_link,
+    refresh_group_navigation_link,
     set_selected_group,
 )
 from app.services.session_ops import cleanup_session, set_group_open, transfer_session
@@ -355,6 +357,7 @@ async def net_toggle(cb: CallbackQuery, bot: Bot):
             except Exception:
                 pass
             invalidated, revoked = await invalidate_group_invites(bot, chat_id, 'group_disabled')
+            await invalidate_navigation_link(bot, chat_id)
             suffix = f' Invitations invalidées : {invalidated}.'
         else:
             suffix = ''
@@ -366,6 +369,7 @@ async def net_toggle(cb: CallbackQuery, bot: Bot):
             except Exception as exc:
                 await log_error(f'sanction_reconcile:{chat_id}', exc)
                 suffix = ' ⚠️ Réconciliation des sanctions incomplète.'
+            await refresh_group_navigation_link(bot, chat_id)
         await ensure_all_status_messages(bot, recreate_on_change=True)
         await cb.message.answer(f'✅ Groupe {state}.{suffix}')
     else:

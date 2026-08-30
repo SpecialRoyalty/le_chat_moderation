@@ -5,6 +5,7 @@ from app.services.actions import trusted_command
 from app.services.hashban import remember_album_message
 from app.services.invites import on_join
 from app.services.moderation import moderate_message
+from app.services.sanctions import capture_manual_admin_ban
 from app.services.network import (
     handle_bot_membership_update,
     is_approved_group,
@@ -26,7 +27,10 @@ async def bot_added(event: ChatMemberUpdated, bot: Bot):
 
 @router.chat_member()
 async def member_update(event: ChatMemberUpdated, bot: Bot):
+    # D'abord mettre à jour l'appartenance locale, puis propager un éventuel
+    # ban fait manuellement par un administrateur depuis l'interface Telegram.
     await on_join(event, bot)
+    await capture_manual_admin_ban(bot, event)
 
 
 @router.message(F.new_chat_members | F.left_chat_member)

@@ -90,3 +90,23 @@ Sur un groupe de test :
 ## Bases séparées actuelles
 
 Si tes trois anciens bots utilisent **trois PostgreSQL différentes**, choisir une base comme base centrale ne récupère naturellement que les hash-bans de cette base. Il faudra alors fusionner/importer les lignes `media_hashes_test` et `media_fingerprints_test` des deux autres bases avant de les éteindre. Ne pas supprimer ces bases avant cette fusion.
+
+## 9. Migration Média V2
+
+Garder la **même `DATABASE_URL`**. Ne pas supprimer `media_hashes_test` ni `media_fingerprints_test` : les anciens hash-bans restent la source historique et sont consultés par la nouvelle version.
+
+Deux tables additives seront créées automatiquement par `create_all()` :
+
+- `global_media_registry_test` : cache/registre global des médias vus ;
+- `media_ban_jobs_test` : reprises persistantes des analyses `/pedo` incomplètes.
+
+Aucune colonne historique n'est modifiée et aucun reset des hash-bans n'est exécuté.
+
+Après le premier démarrage, ouvrir **Santé** et vérifier :
+
+- Hash-ban exacts ;
+- Empreintes blacklistées ;
+- Registre média global ;
+- Reprises hash-ban en attente / échecs finaux.
+
+Le registre global démarre vide pour les métadonnées nouvelles, mais l'anti-repost exact continue de consulter `media_hashes_test`, donc l'historique existant n'est pas perdu. Le registre s'enrichit progressivement au fil des nouveaux messages.

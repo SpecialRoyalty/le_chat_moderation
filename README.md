@@ -103,3 +103,23 @@ Ces tests ne remplacent pas un essai réel Telegram/Railway : les appels Bot API
 - Les anciens messages `MAINTENANCE` sont remplacés par des messages `CE GROUPE EST EN PAUSE` / `PROCHAINE SESSION`.
 - Le bouton de redirection utilise automatiquement le lien public du groupe, son lien principal Telegram lorsqu'il est disponible, ou un lien direct réseau créé par le bot pour un groupe privé. Aucun réglage manuel n'est nécessaire dans le cas normal.
 - Le lien direct réseau privé est invalidé lorsque le groupe devient indisponible ou est désactivé.
+
+## Média V2 — anti-repost réseau + /pedo renforcé
+
+Cette édition ajoute un registre média global sans modifier les anciennes tables de blacklist.
+
+- Le ON/OFF anti-repost reste **propre au groupe**, mais l'historique consulté est celui de **tout le réseau**.
+- Détection anti-repost en 3 niveaux : `file_unique_id` → SHA256 → empreinte perceptuelle stricte.
+- Une vidéo déjà analysée n'est pas retraitée inutilement : le registre `global_media_registry_test` mémorise son état et la génération de blacklist vérifiée.
+- Le fichier n'est téléchargé qu'une seule fois pour SHA + analyse visuelle.
+- L'analyse vidéo entrante utilise 6 images ; `/pedo` en utilise 12 et plusieurs variantes de recadrage/miroir afin de mieux résister aux réencodages et modifications légères.
+- Les recherches perceptuelles utilisent un index BK-tree en mémoire au lieu de comparer chaque nouvelle vidéo à chaque empreinte une par une.
+- L'index SAFE est conservé et enrichi incrémentalement, afin d'éviter les reconstructions répétées quand la médiathèque grossit.
+- `/pedo` blackliste immédiatement le `file_unique_id` **avant** l'analyse lourde, puis ajoute SHA + empreintes visuelles.
+- Si Telegram/FFmpeg échoue, `media_ban_jobs_test` conserve une reprise automatique. Le scheduler retente jusqu'à 5 fois.
+- `/pedo` promeut aussi en blacklist globale tous les anciens médias déjà attribués à l'utilisateur ciblé.
+- `/hashdemande` affiche désormais l'état réseau, le SHA, la correspondance perceptuelle, le registre et les reprises éventuelles.
+
+### Invitations
+
+Le vieux système de paliers/récompenses n'est plus utilisé. Chaque invitation validée ajoute simplement `+1` à `total_invites`. Ce compteur est cumulatif et n'est jamais remis à zéro. Le TOP inviteurs utilise ce même compteur global.

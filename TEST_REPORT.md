@@ -1,34 +1,39 @@
-# Rapport de vérification — GROSCHAT Central
+# Rapport de vérification — GROSCHAT Central Média V2
 
-Date de préparation : 2026-08-30
+Date de préparation : 2026-10-08
 
 ## Résultat
 
-`tests/verify_project.py` : **60 contrôles OK / 0 échec**.
+`tests/verify_project.py` : **78 contrôles OK / 0 échec**.
 
-## Contrôles réalisés
+Un test comportemental supplémentaire du BK-tree a également validé :
 
-- Compilation syntaxique de l'ensemble de `app/`.
-- Conservation stricte du schéma historique, dont `media_hashes_test` et `media_fingerprints_test`.
-- Simulation additive de `create_all()` avec conservation d'un ancien hash-ban `banned=True`.
-- Absence de migration destructive (`DROP TABLE`, `TRUNCATE`, `metadata.drop_all`, suppression des blacklists).
-- Approbation sécurisée des groupes et migration legacy limitée au bootstrap.
-- Un seul groupe actif et cycle de vote propre au groupe sélectionné.
-- Invalidation des invitations et failover en cas de perte d'un groupe.
-- Mots isolés (`cp` ne correspond pas à `jecpquoi`, `cp123`, etc.).
-- Sanctions globales persistées avant les appels Telegram.
-- `/pedo` utilise le ban global.
-- Ban manuel Telegram (`kicked`) capturé et propagé à tout le réseau sans boucle avec les bans du bot.
-- Les groupes OFF mais encore joignables reçoivent eux aussi les bans globaux.
-- Un groupe ajouté plus tard réapplique les sanctions historiques lors de son approbation.
-- Une arrivée dans un groupe réapplique immédiatement un ban global encore actif.
-- Nouveau wording de statut sans `MAINTENANCE`.
-- Lien de navigation automatique vers le groupe actif/sélectionné, y compris pour les groupes privés.
-- Lien direct privé invalidé si le groupe devient indisponible.
-- Validation des invitations persistante et contrôle de présence après 5 minutes.
-- Tous les imports locaux `app.*` existent.
-- Absence des anciens modules VIP/Crowdfunding/Justice.
+- correspondance photo à faible distance de Hamming ;
+- refus vidéo à 4/6 frames pour le seuil anti-repost strict ;
+- détection vidéo à 5/6 frames ;
+- calcul correct du seuil anti-repost vidéo.
 
-## Limite des tests locaux
+## Contrôles Média V2
 
-Les appels réels au Bot API Telegram et à la PostgreSQL Railway de production ne sont pas reproduits localement. Les chemins réseau disposent néanmoins de timeouts, persistance DB et mécanismes de réconciliation. Un smoke-test Telegram réel reste recommandé avant une vraie session.
+- compilation de tout `app/` ;
+- schéma historique strictement inchangé ;
+- conservation simulée d'un ancien hash-ban pendant `create_all()` ;
+- création additive de `global_media_registry_test` et `media_ban_jobs_test` ;
+- pipeline unique hash-ban + anti-repost ;
+- anti-repost réseau par ID Telegram, SHA256 et perceptuel ;
+- un seul téléchargement du fichier pour SHA + fingerprint ;
+- index BK-tree au lieu d'un scan perceptuel linéaire complet ;
+- 6 frames pour l'analyse entrante et 12 pour la création `/pedo` ;
+- variantes visuelles recadrées et miroir sur les nouveaux hash-bans ;
+- reprise persistante d'une analyse `/pedo` échouée, jusqu'à 5 essais ;
+- promotion de tous les anciens médias connus d'un utilisateur lors de `/pedo` ;
+- scheduler de reprise hash-ban ;
+- conservation de la propagation globale des bans ;
+- compteur d'invitations cumulatif simple ;
+- suppression des paliers/récompenses dans le code et le panel ;
+- maintien de l'isolation des mots bannis ;
+- maintien des protections réseau, invitations par groupe et failover.
+
+## Limites des tests locaux
+
+Les vrais téléchargements Telegram, les droits administrateur live et la PostgreSQL Railway de production nécessitent les credentials de production et ne sont pas simulés ici. Le code contient des timeouts, une file de reprise persistante et des chemins de dégradation afin qu'un échec d'analyse ne perde pas le `file_unique_id` déjà blacklisté.

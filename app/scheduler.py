@@ -7,6 +7,7 @@ from app.config import get_settings
 from app.services import settings as st
 from app.services.ads import send_random_ad
 from app.services.invites import send_invite_ad, top_text, validate_invites
+from app.services.hashban import process_pending_hashban_jobs
 from app.services.network import (
     active_chat_id,
     default_target_chat_id,
@@ -93,5 +94,9 @@ def start_scheduler(bot: Bot):
     scheduler.add_job(send_invite_ad, 'cron', hour='23', minute='25', args=[bot], id='invite_ad')
     scheduler.add_job(security_close_if_manual, 'interval', minutes=5, args=[bot], id='security_close')
     scheduler.add_job(group_health_check, 'interval', minutes=5, args=[bot], id='network_health')
+    # Les /pedo dont Telegram/FFmpeg n'a pas pu calculer SHA/visuel sont
+    # repris sans bloquer la commande trusted. max_instances=1 évite tout
+    # chevauchement en cas de ralentissement réseau.
+    scheduler.add_job(process_pending_hashban_jobs, 'interval', minutes=2, args=[bot], id='hashban_retry')
     scheduler.start()
     return scheduler

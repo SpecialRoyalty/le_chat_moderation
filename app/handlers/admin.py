@@ -47,8 +47,6 @@ from app.services.invites import (
     invite_health_text,
     send_invite_ad,
     send_invite_private,
-    set_tiers_from_text,
-    tiers_text,
     top_text,
 )
 from app.services.moderation import invalidate_word_cache
@@ -135,7 +133,7 @@ async def dashboard_text(uid: int) -> str:
         f'🗳️ Sélectionné : {await group_display_name(selected) if selected else "aucun"}\n'
         f'🎯 Groupe cible panel : {await group_display_name(target) if target else "aucun"}\n\n'
         'Les sanctions graves et le hash-ban sont globaux.\n'
-        'Invitations, règles locales, pubs, anti-repost et tracking restent propres à chaque groupe.'
+        'Invitations, règles locales, pubs et tracking restent propres à chaque groupe. L’anti-repost se règle par groupe mais consulte l’historique média de tout le réseau.'
     )
 
 
@@ -542,7 +540,6 @@ async def await_input(cb: CallbackQuery):
         'hash_ban_media': 'Envoie le média à bannir globalement par hash.',
         'invite_text': 'Envoie le texte du message invitations.',
         'invite_image': 'Envoie l’image du message invitations.',
-        'invite_tiers': 'Envoie les paliers : 1|Label|Lien GoFile',
     }
     await cb.message.answer('✍️ ' + prompts.get(state, 'Envoie la valeur.'))
     await cb.answer()
@@ -776,13 +773,6 @@ async def cb_invite_health(cb: CallbackQuery):
         await cb.answer()
 
 
-@router.callback_query(F.data == 'invite_tiers')
-async def cb_invite_tiers(cb: CallbackQuery):
-    if cb.from_user and is_admin(cb.from_user.id):
-        await cb.message.answer(await tiers_text(), reply_markup=invite_admin_kb())
-        await cb.answer()
-
-
 @router.callback_query(F.data.startswith('broadcast_target:'))
 async def broadcast_target(cb: CallbackQuery):
     if not cb.from_user or not is_admin(cb.from_user.id):
@@ -904,9 +894,6 @@ async def admin_text_state(msg: Message, bot: Bot):
                 return
             await st.set_value('invite_image_file_id', msg.photo[-1].file_id)
             await msg.answer('✅ Image invitations sauvegardée.', reply_markup=invite_admin_kb())
-        elif state == 'invite_tiers':
-            ok = await set_tiers_from_text(msg.text or '')
-            await msg.answer('✅ Paliers sauvegardés.' if ok else 'Format invalide.', reply_markup=invite_admin_kb())
         elif state == 'hash_ban_media':
             report = await ban_hashes_from_messages([msg], bot)
             if report.media_count:

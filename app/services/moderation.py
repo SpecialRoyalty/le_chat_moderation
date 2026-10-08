@@ -14,7 +14,7 @@ from app.config import get_settings
 from app.db.models import GroupWordRule, MediaHash, RecentJoin, User, WordRule
 from app.db.session import SessionLocal
 from app.services import settings as st
-from app.services.hashban import contains_banned_hash, media_file_entries
+from app.services.hashban import inspect_incoming_media, media_file_entries, register_allowed_media, mark_media_seen
 from app.services.network import is_approved_group, migration_exempt
 from app.services.sanctions import ban_global, restrict_global
 from app.services.state import log_error, track
@@ -277,32 +277,50 @@ async def moderate_message(bot: Bot, msg: Message) -> bool:
             ))
             return False
 
-        blocked, details = await contains_banned_hash(bot, msg)
-        if blocked:
+        # Un seul pipeline pour la blacklist /pedo ET l’anti-repost global.
+        # Le média n’est téléchargé qu’une seule fois quand une analyse profonde
+        # est réellement nécessaire. L’historique anti-repost est commun à tous
+        # les groupes du réseau, mais le ON/OFF reste configurable par groupe.
+        repost_enabled = await st.group_bool(msg.chat.id, 'repost_enabled', False)
+        inspection = await inspect_incoming_media(bot, msg, repost_enabled=repost_enabled)
+
+        if inspection.banned:
             await asyncio.gather(
                 delete(bot, msg),
                 ban(bot, msg.chat.id, uid, reason='hashban'),
             )
             asyncio.create_task(_store_metrics(
-                last_hashban_method=str(details.get('method', 'unknown')),
+                last_hashban_method=inspection.method,
                 last_hashban_user=str(uid),
                 last_hashban_at=datetime.utcnow().isoformat(timespec='seconds'),
             ))
             return False
 
-        if await st.group_bool(msg.chat.id, 'repost_enabled', False) and await contains_known_media(msg):
+        if inspection.repost:
             await delete(bot, msg)
+            if media_file_entries(msg):
+                asyncio.create_task(mark_media_seen(media_file_entries(msg)[0][0]))
             asyncio.create_task(_store_metrics(
+                last_repost_method=inspection.method,
                 last_repost_blocked_at=datetime.utcnow().isoformat(timespec='seconds'),
                 last_repost_blocked_user=str(uid),
             ))
             warn = await bot.send_message(
                 msg.chat.id,
-                f'{display_name(msg.from_user)}, média déjà posté : repost interdit.',
+                f'{display_name(msg.from_user)}, ce média a déjà circulé sur le réseau : repost interdit.',
             )
             await track(msg.chat.id, warn.message_id, None, 'temp', False)
             return False
-        await record_media(msg)
+
+        await register_allowed_media(msg, inspection)
+        sid = int(await st.group_get_value(msg.chat.id, 'active_session_id', '0', inherit_global=False) or '0')
+        async with SessionLocal() as db:
+            await db.execute(update(User).where(User.id == uid).values(
+                media_count=User.media_count + 1,
+                last_media_session=sid,
+            ))
+            await db.commit()
+        _USER_HAS_MEDIA_CACHE[uid] = True
 
     if has_link(text):
         if trusted or admin:

@@ -4,10 +4,10 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 from app.db.session import SessionLocal
-from app.db.models import TrackedMessage, TrustedAction, MediaHash, MediaFingerprint
+from app.db.models import TrackedMessage, TrustedAction
 from app.config import get_settings
 from app.services.moderation import ban, restrict, delete
-from app.services.hashban import album_messages_for, ban_hashes_from_messages, hash_diagnostic
+from app.services.hashban import album_messages_for, ban_hashes_from_messages, hash_diagnostic, promote_user_media_banned
 
 TRUSTED_COMMANDS = {'/supprime', '/mineur', '/pasfr', '/pedo', '/hashdemande', '/clean', '/info'}
 
@@ -136,18 +136,19 @@ async def trusted_command(bot: Bot, msg: Message):
 
         report = await ban_hashes_from_messages(album, bot)
 
-        # Mise à jour DB rapide, puis fermeture de la connexion AVANT les appels
-        # Telegram potentiellement lents.
+        # /pedo promeut aussi TOUS les anciens médias déjà connus de cet
+        # utilisateur dans la blacklist globale (exact + perceptuel + registre).
+        await promote_user_media_banned(uid)
+
+        # On récupère ensuite les messages historiques sans garder la connexion
+        # PostgreSQL pendant les suppressions Telegram.
         async with SessionLocal() as db:
-            await db.execute(update(MediaHash).where(MediaHash.user_id == uid).values(banned=True))
-            await db.execute(update(MediaFingerprint).where(MediaFingerprint.user_id == uid).values(banned=True))
             tracked_rows = list((await db.execute(select(
                 TrackedMessage.id, TrackedMessage.chat_id, TrackedMessage.message_id
             ).where(
                 TrackedMessage.user_id == uid,
                 TrackedMessage.deleted.is_(False),
             ))).all())
-            await db.commit()
 
         # Nettoyage des messages suivis dans TOUS les groupes du réseau. Le ban
         # global a déjà été appliqué, cette phase peut donc prendre un peu plus de temps.

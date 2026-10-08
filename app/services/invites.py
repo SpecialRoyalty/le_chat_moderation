@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-import json
-
 from aiogram import Bot
 from aiogram.types import ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import delete, select
@@ -28,45 +26,10 @@ from app.services.users import upsert_user
 # Les validations d'invitation sont persistées dans PostgreSQL afin de survivre
 # aux redémarrages Railway. Aucun cache mémoire n'est nécessaire ici.
 
-DEFAULT_TIERS = [
-    {'count': 1, 'label': '1 vidéo', 'link': ''},
-    {'count': 10, 'label': '20 vidéos', 'link': ''},
-    {'count': 50, 'label': '100 vidéos', 'link': ''},
-    {'count': 100, 'label': '200 vidéos', 'link': ''},
-    {'count': 300, 'label': '500 vidéos', 'link': ''},
-    {'count': 500, 'label': '1 500 vidéos', 'link': ''},
-    {'count': 1000, 'label': 'Accès bonus à vie', 'link': ''},
-]
-
-
-async def tiers():
-    raw = await st.get_value('invite_tiers_json', '')
-    if not raw:
-        return DEFAULT_TIERS
-    try:
-        data = json.loads(raw)
-        return data if isinstance(data, list) else DEFAULT_TIERS
-    except Exception:
-        return DEFAULT_TIERS
-
-
-async def set_tiers_from_text(text: str):
-    rows = []
-    for line in (text or '').splitlines():
-        parts = [p.strip() for p in line.split('|')]
-        if len(parts) >= 3 and parts[0].isdigit():
-            rows.append({'count': int(parts[0]), 'label': parts[1], 'link': parts[2]})
-    if not rows:
-        return False
-    rows = sorted(rows, key=lambda x: x['count'])
-    await st.set_value('invite_tiers_json', json.dumps(rows, ensure_ascii=False))
-    return True
-
-
 async def invite_text():
     return await st.get_value(
         'invite_text',
-        '🎁 Programme de récompenses\n\nInvite des membres et débloque tes récompenses.',
+        '🔗 Invitations\n\nInvite des membres avec ton lien personnel. Chaque arrivée validée augmente ton compteur.',
     )
 
 
@@ -144,16 +107,19 @@ async def send_invite_private(bot: Bot, user_id: int, group_chat_id: int | None 
         return
     link = await get_or_create_link(bot, user_id, target)
     group = await get_group(target)
-    t = await tiers()
+    async with SessionLocal() as db:
+        user = await db.get(User, user_id)
+        total = int(user.total_invites if user else 0)
     lines = [
-        '🎁 Ton lien unique',
+        '🔗 TON LIEN D’INVITATION',
         f'Groupe : {group.title if group else target}',
         '', link, '',
-        'Chaque invité validé augmente ton compteur.', '', 'Paliers :',
+        f'👥 Compteur validé : {total}',
+        '',
+        'Chaque personne qui rejoint avec ton lien et reste au moins 5 minutes ajoute +1 à ton compteur.',
+        '',
+        'ℹ️ Si ce groupe devient indisponible, ce lien sera invalidé et tu pourras demander un nouveau lien pour le groupe de remplacement.',
     ]
-    for row in t:
-        lines.append(f"- {row['count']} invité(s) → {row['label']}")
-    lines += ['', 'ℹ️ Si ce groupe devient indisponible, ce lien sera invalidé et tu pourras demander un nouveau lien pour le groupe de remplacement.']
     await bot.send_message(user_id, '\n'.join(lines))
 
 
@@ -243,32 +209,6 @@ async def on_join(event: ChatMemberUpdated, bot: Bot | None = None):
         await db.commit()
 
 
-async def _maybe_reward(bot: Bot, owner: int):
-    async with SessionLocal() as db:
-        user = await db.get(User, owner)
-        if not user:
-            return
-        counter = user.reward_counter
-    available = [row for row in await tiers() if counter >= int(row.get('count', 0))]
-    if not available:
-        return
-    reward = max(available, key=lambda row: int(row.get('count', 0)))
-    async with SessionLocal() as db:
-        user = await db.get(User, owner)
-        if user:
-            user.reward_counter = 0
-            await db.commit()
-    label = reward.get('label', 'Récompense')
-    link = reward.get('link', '')
-    msg = f'🎁 PALIER ATTEINT\n\nRécompense débloquée :\n{label}\n\nTon compteur récompense repart à 0.'
-    if link:
-        msg += f'\n\nLien :\n{link}'
-    try:
-        await bot.send_message(owner, msg)
-    except Exception:
-        pass
-
-
 async def validate_invites(bot: Bot):
     """Valide les invitations âgées d'au moins 5 min, de façon persistante.
 
@@ -292,14 +232,14 @@ async def validate_invites(bot: Bot):
             membership = await db.get(NetworkMembership, (pending.user_id, pending.chat_id))
             should_credit = bool(membership and membership.status in ('member', 'restricted'))
 
-            counter = total = 0
+            total = 0
             if owner and should_credit:
                 user = await db.get(User, owner)
                 if user:
                     user.total_invites += 1
-                    user.reward_counter += 1
-                    user.weekly_invites += 1
-                    counter = user.reward_counter
+                    # total_invites est désormais LE compteur cumulatif. Les anciennes
+                    # colonnes reward_counter/weekly_invites restent uniquement pour
+                    # compatibilité de schéma et ne pilotent plus aucune récompense.
                     total = user.total_invites
                 if pending.group_invite_link_id:
                     link_row = await db.get(GroupInviteLink, pending.group_invite_link_id)
@@ -314,53 +254,47 @@ async def validate_invites(bot: Bot):
             ))
             await db.commit()
 
-        if owner and should_credit and (counter or total):
+        if owner and should_credit and total:
             try:
                 await bot.send_message(
                     owner,
-                    f'✅ +1 invité validé\n\nProgression récompense : {counter}\nTotal invités : {total}',
+                    f'✅ +1 invité validé\n\n👥 Ton compteur : {total}',
                 )
             except Exception:
                 pass
-            await _maybe_reward(bot, owner)
 
 
 async def top_text():
     async with SessionLocal() as db:
         users = list((await db.execute(select(User).where(
-            User.weekly_invites >= 100,
-        ).order_by(User.weekly_invites.desc()).limit(10))).scalars().all())
+            User.total_invites > 0,
+        ).order_by(User.total_invites.desc()).limit(10))).scalars().all())
     if not users:
         return '🏆 TOP INVITEURS\n\nAucune statistique pour le moment.'
-    lines = ['🏆 TOP INVITEURS — J-7', '']
+    lines = ['🏆 TOP INVITEURS — COMPTEUR GLOBAL', '']
     for i, user in enumerate(users, 1):
         name = ('@' + user.username[:2] + '****') if user.username else (user.full_name[:2] + '****')
-        lines.append(f'{i}. {name} — {user.weekly_invites} invités')
-    lines.append('\nLe TOP 3 débloque tous les avantages.\nFin du classement dans : 7 jours')
+        lines.append(f'{i}. {name} — {user.total_invites} invités')
+    lines.append('\nLe compteur est cumulatif et ne se remet pas à zéro.')
     return '\n'.join(lines)
 
 
 async def invite_health_text(chat_id: int | None = None):
     target = chat_id or await active_chat_id() or await selected_chat_id()
     if not target:
-        return '🎁 Invitations\n\nAucun groupe cible.'
+        return '🔗 Invitations\n\nAucun groupe cible.'
     group = await get_group(target)
     async with SessionLocal() as db:
         links = list((await db.execute(select(GroupInviteLink).where(
             GroupInviteLink.group_chat_id == target,
             GroupInviteLink.active.is_(True),
         ))).scalars().all())
+        total_valid = int(sum(link.valid_count for link in links))
     return (
-        f'🎁 Invitations — {group.title if group else target}\n\n'
+        f'🔗 Invitations — {group.title if group else target}\n\n'
         f'Dernière publication : {await st.group_get_value(target, "last_invite_sent_at", "jamais", inherit_global=False)}\n'
         f'Liens actifs : {len(links)}\n'
+        f'Invitations validées via liens actifs : {total_valid}\n'
         f'Image configurée : {"oui" if await st.get_value("invite_image_file_id", "") else "non"}\n'
-        f'Paliers : {len(await tiers())}'
+        'Compteur : cumulatif, sans palier ni remise à zéro.'
     )
-
-
-async def tiers_text():
-    lines = ['🎁 Paliers actuels', '', 'Format édition : 1|Label|Lien GoFile']
-    for row in await tiers():
-        lines.append(f"{row['count']}|{row['label']}|{row.get('link', '')}")
-    return '\n'.join(lines)

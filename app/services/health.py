@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from aiogram import Bot
 
-from app.db.models import Advertisement, ErrorLog, MediaFingerprint, MediaHash, TrackedMessage, User
+from app.db.models import Advertisement, ErrorLog, GlobalMediaRegistry, MediaBanJob, MediaFingerprint, MediaHash, TrackedMessage, User
 from app.db.session import SessionLocal
 from app.services import settings as st
 from app.services.network import active_chat_id, get_network_state, group_display_name, list_groups, selected_chat_id
@@ -32,6 +32,10 @@ async def health_text(bot: Bot):
         media_known = (await db.execute(select(func.count(MediaHash.id)))).scalar() or 0
         media_banned = (await db.execute(select(func.count(MediaHash.id)).where(MediaHash.banned.is_(True)))).scalar() or 0
         fingerprints_banned = (await db.execute(select(func.count(MediaFingerprint.id)).where(MediaFingerprint.banned.is_(True)))).scalar() or 0
+        global_registry = (await db.execute(select(func.count(GlobalMediaRegistry.file_unique_id)))).scalar() or 0
+        global_registry_banned = (await db.execute(select(func.count(GlobalMediaRegistry.file_unique_id)).where(GlobalMediaRegistry.banned.is_(True)))).scalar() or 0
+        hashban_retry = (await db.execute(select(func.count(MediaBanJob.id)).where(MediaBanJob.status.in_(['pending', 'error'])))).scalar() or 0
+        hashban_failed = (await db.execute(select(func.count(MediaBanJob.id)).where(MediaBanJob.status == 'failed'))).scalar() or 0
         ads_total = (await db.execute(select(func.count(Advertisement.id)))).scalar() or 0
         ads_active = (await db.execute(select(func.count(Advertisement.id)).where(Advertisement.active.is_(True)))).scalar() or 0
 
@@ -57,8 +61,11 @@ async def health_text(bot: Bot):
         f'Créneau cible : {slot}\nObjectif cible : {goal}\n\n'
         'Groupes:\n' + '\n'.join(group_lines) + '\n\n'
         f'Messages suivis non supprimés : {tracked}\n'
-        f'Comptes suspects : {suspects}\nMédias connus : {media_known}\n'
-        f'Anti-repost groupe cible : {repost}\nPublicités groupe cible : {ads}\n'
+        f'Comptes suspects : {suspects}\nMédias historiques : {media_known}\n'
+        f'Registre média global : {global_registry} ({global_registry_banned} bannis)\n'
+        f'Hash-ban exacts : {media_banned}\nEmpreintes blacklistées : {fingerprints_banned}\n'
+        f'Reprises hash-ban en attente : {hashban_retry} / échecs finaux : {hashban_failed}\n'
+        f'Anti-repost groupe cible : {repost} (historique réseau global)\nPublicités groupe cible : {ads}\n'
         f'Publicités configurées : {ads_active} actives / {ads_total} total\n'
         f'Erreurs loggées : {errors}\n\n'
         'ℹ️ Un timeout Telegram ne marque jamais un groupe comme sauté. Les pertes fortes sont détectées via le statut du bot ou confirmées manuellement.'

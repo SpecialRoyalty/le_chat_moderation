@@ -91,6 +91,7 @@ async def init_defaults():
         'ads_text': '📢 Publicité',
         'ads_enabled': 'true',
         'repost_enabled': 'false',
+        'media_ban_generation': '0',
         'last_repost_blocked_at': 'jamais',
         'last_repost_blocked_user': '',
         'weekly_top_started': 'false',

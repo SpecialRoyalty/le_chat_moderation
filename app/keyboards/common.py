@@ -134,10 +134,6 @@ def invite_admin_kb():
             InlineKeyboardButton(text='📝 Modifier texte', callback_data='await:invite_text'),
             InlineKeyboardButton(text='🖼 Modifier image', callback_data='await:invite_image'),
         ],
-        [
-            InlineKeyboardButton(text='🎁 Voir paliers', callback_data='invite_tiers'),
-            InlineKeyboardButton(text='✏️ Modifier paliers', callback_data='await:invite_tiers'),
-        ],
         [InlineKeyboardButton(text='⬅️ Retour', callback_data='adm_dashboard')],
     ])
 

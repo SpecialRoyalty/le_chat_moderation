@@ -236,3 +236,48 @@ class NetworkEvent(Base):
     admin_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True)
     details: Mapped[str]=mapped_column(Text, default='')
     created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+# ---------------------------------------------------------------------------
+# Registre média global / reprise des hash-bans
+# ---------------------------------------------------------------------------
+class GlobalMediaRegistry(Base):
+    __tablename__='global_media_registry_test'
+    # L'identifiant Telegram reste le chemin ultra-rapide. Une nouvelle
+    # représentation/réencodage obtient une autre ligne mais peut être reliée
+    # par SHA256 ou empreinte perceptuelle.
+    file_unique_id: Mapped[str]=mapped_column(String(255), primary_key=True)
+    file_id: Mapped[str]=mapped_column(Text, default='')
+    sha256: Mapped[str|None]=mapped_column(String(80), nullable=True, index=True)
+    media_type: Mapped[str]=mapped_column(String(30), default='unknown', index=True)
+    first_user_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True, index=True)
+    first_chat_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True, index=True)
+    first_message_id: Mapped[int|None]=mapped_column(Integer, nullable=True)
+    first_seen_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    last_seen_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow, index=True)
+    seen_count: Mapped[int]=mapped_column(Integer, default=1)
+    analysis_state: Mapped[str]=mapped_column(String(20), default='pending', index=True)  # pending/safe/banned/error
+    checked_ban_generation: Mapped[int]=mapped_column(Integer, default=0)
+    perceptual_ready: Mapped[bool]=mapped_column(Boolean, default=False)
+    banned: Mapped[bool]=mapped_column(Boolean, default=False, index=True)
+    __table_args__=(
+        Index('ix_global_media_sha_banned_test','sha256','banned'),
+        Index('ix_global_media_type_state_test','media_type','analysis_state'),
+    )
+
+
+class MediaBanJob(Base):
+    __tablename__='media_ban_jobs_test'
+    id: Mapped[int]=mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_file_unique_id: Mapped[str]=mapped_column(String(255), index=True)
+    file_id: Mapped[str]=mapped_column(Text, default='')
+    media_type: Mapped[str]=mapped_column(String(30), default='unknown', index=True)
+    user_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True, index=True)
+    source_chat_id: Mapped[int|None]=mapped_column(BigInteger, nullable=True)
+    source_message_id: Mapped[int|None]=mapped_column(Integer, nullable=True)
+    status: Mapped[str]=mapped_column(String(20), default='pending', index=True)  # pending/done/error
+    attempts: Mapped[int]=mapped_column(Integer, default=0)
+    last_error: Mapped[str|None]=mapped_column(Text, nullable=True)
+    next_attempt_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    __table_args__=(Index('ix_media_ban_job_pending_test','status','next_attempt_at'),)

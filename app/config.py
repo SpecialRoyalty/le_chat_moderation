@@ -62,11 +62,15 @@ class Settings(BaseSettings):
 
     @cached_property
     def trusted_id_set(self) -> set[int]:
-        return set(self._parse_ids(self.trusted_ids))
+        # Un ADMIN_ID est toujours considéré comme trusted, même s'il n'est pas
+        # répété dans TRUSTED_IDS. Cela garde une seule hiérarchie cohérente :
+        # admin => trusted => protégé des sanctions automatiques.
+        return set(self._parse_ids(self.trusted_ids)) | self.admin_id_set
 
     @cached_property
     def all_admin_ids(self) -> set[int]:
-        return self.admin_id_set | self.trusted_id_set
+        # Compatibilité avec le reste du projet : contient admins + trusted.
+        return self.trusted_id_set
 
 @lru_cache
 def get_settings() -> Settings:

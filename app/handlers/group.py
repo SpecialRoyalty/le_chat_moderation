@@ -15,6 +15,7 @@ from app.services.network import (
     approval_keyboard,
 )
 from app.services.users import upsert_user
+from app.services.session_ops import ensure_privileged_member_can_write
 
 router = Router()
 _SEEN_MEMBERSHIPS: set[tuple[int, int]] = set()
@@ -31,6 +32,13 @@ async def member_update(event: ChatMemberUpdated, bot: Bot):
     # ban fait manuellement par un administrateur depuis l'interface Telegram.
     await on_join(event, bot)
     await capture_manual_admin_ban(bot, event)
+    # Si un ADMIN_ID/TRUSTED_ID rejoint pendant que le groupe est fermé,
+    # Telegram doit lui donner une exception individuelle immédiatement.
+    try:
+        if event.new_chat_member and event.new_chat_member.status in ('member', 'restricted', 'administrator', 'creator'):
+            await ensure_privileged_member_can_write(bot, event.chat.id, event.new_chat_member.user.id)
+    except Exception:
+        pass
 
 
 @router.message(F.new_chat_members | F.left_chat_member)

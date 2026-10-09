@@ -263,9 +263,12 @@ async def admin_cb(cb: CallbackQuery, bot: Bot):
     elif data == 'adm_hashban':
         await cb.message.answer('🚫 Hash ban GLOBAL\n\nUn média blacklisté ici est interdit dans tous les groupes.', reply_markup=hashban_kb())
     elif data == 'adm_settings':
+        media_first = await st.group_bool(target, 'media_before_text_enabled', True) if target else True
         await cb.message.answer(
-            f'⚙️ Paramètres — {await group_display_name(target) if target else "aucun groupe"}\nHoraires spécifiques au groupe cible.',
-            reply_markup=settings_kb(),
+            f'⚙️ Paramètres — {await group_display_name(target) if target else "aucun groupe"}\n'
+            f'Horaires spécifiques au groupe cible.\n'
+            f'Média obligatoire avant le premier texte : {"ON" if media_first else "OFF"}.',
+            reply_markup=settings_kb(media_first),
         )
     await cb.answer()
 
@@ -504,6 +507,26 @@ async def cb_goal_set(cb: CallbackQuery, bot: Bot):
     await st.group_set_value(target, 'vote_goal', str(value))
     await ensure_status_message(bot, target)
     await cb.message.answer(f'✅ Objectif {await group_display_name(target)} : {value}', reply_markup=admin_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == 'media_before_text_toggle')
+async def media_before_text_toggle(cb: CallbackQuery):
+    if not cb.from_user or not is_admin(cb.from_user.id):
+        return
+    target = await get_admin_target(cb.from_user.id)
+    if not target:
+        await cb.answer('Aucun groupe cible.', show_alert=True)
+        return
+    current = await st.group_bool(target, 'media_before_text_enabled', True)
+    new_value = not current
+    await st.group_set_value(target, 'media_before_text_enabled', 'true' if new_value else 'false')
+    await cb.message.answer(
+        f'✍️ Média avant texte — {await group_display_name(target)} : {"ON" if new_value else "OFF"}\n\n'
+        + ('Les membres ordinaires doivent envoyer au moins un média avant leur premier texte.' if new_value
+           else 'Les membres peuvent écrire même s’ils n’ont encore envoyé aucun média.'),
+        reply_markup=settings_kb(new_value),
+    )
     await cb.answer()
 
 

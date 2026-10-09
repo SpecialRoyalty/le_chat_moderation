@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import func, select, update
 
 from app.config import get_settings
@@ -39,6 +39,102 @@ OPEN_PERMS = {
 }
 CLOSED_PERMS = {'can_send_messages': False}
 
+# Exception individuelle appliquée aux ADMIN_IDS/TRUSTED_IDS lorsque le groupe
+# est fermé. Telegram bloque les membres ordinaires via les permissions par
+# défaut du chat AVANT que le handler du bot puisse voir leur message. Sans
+# cette exception, un ADMIN_ID qui n'est pas administrateur Telegram serait
+# lui aussi bloqué malgré le bypass présent dans moderation.py.
+PRIVILEGED_CLOSED_PERMS = {
+    'can_send_messages': True,
+    'can_send_audios': True,
+    'can_send_documents': True,
+    'can_send_photos': True,
+    'can_send_videos': True,
+    'can_send_video_notes': True,
+    'can_send_voice_notes': True,
+    'can_send_polls': True,
+    'can_send_other_messages': True,
+    'can_add_web_page_previews': True,
+}
+
+
+def _ids_csv(values: set[int]) -> str:
+    return ','.join(str(x) for x in sorted(values))
+
+
+def _parse_ids_csv(raw: str) -> set[int]:
+    out: set[int] = set()
+    for part in (raw or '').split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.add(int(part))
+        except ValueError:
+            pass
+    return out
+
+
+async def _set_member_permissions(bot: Bot, chat_id: int, user_id: int, permissions: dict) -> bool:
+    try:
+        await bot.restrict_chat_member(
+            chat_id,
+            user_id,
+            permissions=ChatPermissions(**permissions),
+            use_independent_chat_permissions=True,
+            request_timeout=8,
+        )
+        return True
+    except TelegramBadRequest as exc:
+        # Les admins Telegram ne peuvent pas être restreints et n'en ont pas
+        # besoin : ils contournent déjà les permissions par défaut du groupe.
+        text = str(exc).lower()
+        if 'administrator' in text or 'admin' in text or 'participant_id_invalid' in text or 'user not found' in text:
+            return True
+        await log_error(f'privileged_permissions:{chat_id}:{user_id}', exc)
+        return False
+    except Exception as exc:
+        await log_error(f'privileged_permissions:{chat_id}:{user_id}', exc)
+        return False
+
+
+async def sync_privileged_permissions(bot: Bot, chat_id: int, *, opened: bool) -> None:
+    """Synchronise les exceptions Telegram pour admins/trusted.
+
+    Fermé : les IDs actuellement privilégiés gardent l'écriture, les anciens
+    privilèges mémorisés sont refermés.
+    Ouvert : on remet les anciens + actuels en permissions ouvertes afin qu'une
+    ancienne exception fermée ne puisse pas bloquer un membre après réouverture.
+    """
+    key = 'closed_privileged_ids'
+    current = set(get_settings().all_admin_ids)
+    previous = _parse_ids_csv(await st.group_get_value(chat_id, key, '', inherit_global=False))
+    targets = current | previous
+    if not targets:
+        return
+
+    sem = asyncio.Semaphore(4)
+
+    async def apply(uid: int):
+        async with sem:
+            if opened:
+                perms = OPEN_PERMS
+            else:
+                perms = PRIVILEGED_CLOSED_PERMS if uid in current else CLOSED_PERMS
+            await _set_member_permissions(bot, chat_id, uid, perms)
+
+    await asyncio.gather(*(apply(uid) for uid in targets))
+    await st.group_set_value(chat_id, key, _ids_csv(current))
+
+
+async def ensure_privileged_member_can_write(bot: Bot, chat_id: int, user_id: int) -> None:
+    """À l'arrivée d'un admin/trusted dans un groupe déjà fermé."""
+    if user_id not in get_settings().all_admin_ids:
+        return
+    if await st.is_open(chat_id):
+        return
+    await _set_member_permissions(bot, chat_id, user_id, PRIVILEGED_CLOSED_PERMS)
+
 # Un seul basculement/ouverture/fermeture à la fois dans le processus. Cela
 # empêche deux clics admin simultanés d'ouvrir deux groupes en concurrence.
 _SESSION_SWITCH_LOCK = asyncio.Lock()
@@ -47,10 +143,18 @@ _SESSION_SWITCH_LOCK = asyncio.Lock()
 async def _set_permissions(bot: Bot, chat_id: int, opened: bool) -> bool:
     try:
         await bot.set_chat_permissions(chat_id, permissions=OPEN_PERMS if opened else CLOSED_PERMS, request_timeout=10)
-        return True
     except Exception as exc:
         await log_error(f'permissions:{chat_id}', exc)
         return False
+
+    # Les exceptions individuelles sont best-effort : l'état ouvert/fermé du
+    # groupe ne dépend jamais d'un trusted absent ou d'une erreur ponctuelle sur
+    # une permission individuelle. Les permissions générales sont déjà posées.
+    try:
+        await sync_privileged_permissions(bot, chat_id, opened=opened)
+    except Exception as exc:
+        await log_error(f'privileged_sync:{chat_id}', exc)
+    return True
 
 
 async def _create_session(chat_id: int, kind: str) -> int:

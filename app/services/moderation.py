@@ -247,8 +247,9 @@ async def moderate_message(bot: Bot, msg: Message) -> bool:
     await track(msg.chat.id, msg.message_id, uid, 'message', media)
 
     text = msg.text or msg.caption or ''
-    trusted = uid in s.trusted_id_set
     admin = uid in s.admin_id_set
+    # trusted_id_set inclut volontairement les ADMIN_IDS.
+    trusted = uid in s.trusted_id_set
 
     if is_story(msg):
         await asyncio.gather(
@@ -345,7 +346,8 @@ async def moderate_message(bot: Bot, msg: Message) -> bool:
     if await text_has_word('forbidden', text, msg.chat.id):
         await asyncio.gather(delete(bot, msg), restrict(bot, msg.chat.id, uid, 1, reason='forbidden_word'))
         return False
-    if text and not media and not await _user_has_media(uid):
+    media_before_text_enabled = await st.group_bool(msg.chat.id, 'media_before_text_enabled', True)
+    if media_before_text_enabled and text and not media and not await _user_has_media(uid):
         await delete(bot, msg)
         warn = await bot.send_message(msg.chat.id, f'{display_name(msg.from_user)}, envoie d’abord un média avant d’écrire.')
         await track(msg.chat.id, warn.message_id, None, 'temp', False)

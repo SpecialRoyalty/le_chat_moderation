@@ -91,6 +91,9 @@ async def init_defaults():
         'ads_text': '📢 Publicité',
         'ads_enabled': 'true',
         'repost_enabled': 'false',
+        # Si ON, un membre non trusted doit envoyer au moins un média avant
+        # son premier message texte. Réglage surchargeable par groupe.
+        'media_before_text_enabled': 'true',
         'media_ban_generation': '0',
         'last_repost_blocked_at': 'jamais',
         'last_repost_blocked_user': '',

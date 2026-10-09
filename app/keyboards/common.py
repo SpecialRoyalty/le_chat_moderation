@@ -48,8 +48,10 @@ def goal_kb():
     ])
 
 
-def settings_kb():
+def settings_kb(media_before_text_enabled: bool | None = None):
+    media_label = '🟢 Média avant texte : ON' if media_before_text_enabled is not False else '🔴 Média avant texte : OFF'
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=media_label, callback_data='media_before_text_toggle')],
         [InlineKeyboardButton(text='22h30 → 00h45', callback_data='slot_set:22:30-00:45')],
         [InlineKeyboardButton(text='22h00 → 00h00', callback_data='slot_set:22:00-00:00')],
         [InlineKeyboardButton(text='23h00 → 01h00', callback_data='slot_set:23:00-01:00')],

@@ -37,3 +37,14 @@ Un test comportemental supplémentaire du BK-tree a également validé :
 ## Limites des tests locaux
 
 Les vrais téléchargements Telegram, les droits administrateur live et la PostgreSQL Railway de production nécessitent les credentials de production et ne sont pas simulés ici. Le code contient des timeouts, une file de reprise persistante et des chemins de dégradation afin qu'un échec d'analyse ne perde pas le `file_unique_id` déjà blacklisté.
+
+
+## Correctif admins/trusted + média avant texte — 2026-10-09
+
+- ADMIN_IDS inclus automatiquement dans le rôle trusted.
+- Commandes trusted inchangées (`/supprime`, `/mineur`, `/pasfr`, `/pedo`, `/hashdemande`, `/clean`, `/info`).
+- Écriture admins/trusted possible quand le groupe est fermé via exceptions Telegram individuelles.
+- Les membres ordinaires restent bloqués par les permissions générales du groupe fermé.
+- Toggle par groupe `media_before_text_enabled` ajouté dans `⚙️ Paramètres`, ON par défaut.
+- `actions.py` et `hashban.py` sont inchangés par rapport à Media V2.
+- Suite de vérification : 87/87 contrôles OK.

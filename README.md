@@ -123,3 +123,10 @@ Cette édition ajoute un registre média global sans modifier les anciennes tabl
 ### Invitations
 
 Le vieux système de paliers/récompenses n'est plus utilisé. Chaque invitation validée ajoute simplement `+1` à `total_invites`. Ce compteur est cumulatif et n'est jamais remis à zéro. Le TOP inviteurs utilise ce même compteur global.
+
+
+## Permissions admins/trusted et groupe fermé
+
+- `ADMIN_IDS` sont automatiquement inclus dans les trusted : il n'est pas nécessaire de dupliquer un ID dans `TRUSTED_IDS`.
+- Quand un groupe est fermé, les membres ordinaires restent bloqués par les permissions Telegram, mais les `ADMIN_IDS` et `TRUSTED_IDS` reçoivent une exception individuelle d'écriture.
+- Le réglage **Média avant texte** est maintenant ON/OFF par groupe depuis `⚙️ Paramètres`. ON conserve l'ancien comportement ; OFF autorise le texte dès l'arrivée.

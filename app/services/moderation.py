@@ -19,6 +19,7 @@ from app.services.network import is_approved_group, migration_exempt
 from app.services.sanctions import ban_global, restrict_global
 from app.services.state import log_error, track
 from app.services.users import display_name, protected
+from app.services.vote_participation import mark_participated
 
 
 def has_link(text: str):
@@ -322,6 +323,10 @@ async def moderate_message(bot: Bot, msg: Message) -> bool:
             ))
             await db.commit()
         _USER_HAS_MEDIA_CACHE[uid] = True
+        if sid:
+            # La participation est validée seulement après que le média a passé
+            # hash-ban, anti-repost et règles de modération.
+            await mark_participated(msg.chat.id, sid, uid)
 
     if has_link(text):
         if trusted or admin:

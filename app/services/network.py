@@ -25,6 +25,7 @@ from app.db.models import (
 from app.db.session import SessionLocal
 from app.services import settings as st
 from app.utils.time import day_key
+from app.services.vote_participation import cancel_commitments
 
 logger = logging.getLogger(__name__)
 
@@ -426,6 +427,10 @@ async def set_selected_group(chat_id: int | None, admin_id: int | None = None) -
                     )
                 )
             await db.commit()
+        if chat_id is not None:
+            await cancel_commitments(chat_id, reason='cancelled_new_cycle')
+        if old and not state.active_chat_id:
+            await cancel_commitments(old, reason='cancelled_selection_changed')
     await _mutate_state(selected_chat_id=chat_id)
     await log_network_event('selected_group_changed', chat_id, admin_id=admin_id, details=f'old={old}')
     return True
@@ -559,6 +564,9 @@ async def mark_group_unavailable(bot: Bot, chat_id: int, *, reason: str, lost: b
 
     # Ferme l'état de session/vote en base même si Telegram est devenu inaccessible.
     sid = int(await st.group_get_value(chat_id, 'active_session_id', '0', inherit_global=False) or '0')
+    if sid:
+        await cancel_commitments(chat_id, session_id=sid, reason='cancelled_group_lost')
+    await cancel_commitments(chat_id, reason='cancelled_group_lost')
     async with SessionLocal() as db:
         if sid:
             session = await db.get(SessionLog, sid)

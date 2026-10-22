@@ -94,6 +94,8 @@ async def init_defaults():
         # Si ON, un membre non trusted doit envoyer au moins un média avant
         # son premier message texte. Réglage surchargeable par groupe.
         'media_before_text_enabled': 'true',
+        # Si ON, voter engage à envoyer au moins un média valide pendant la session.
+        'vote_participation_enabled': 'true',
         'media_ban_generation': '0',
         'last_repost_blocked_at': 'jamais',
         'last_repost_blocked_user': '',

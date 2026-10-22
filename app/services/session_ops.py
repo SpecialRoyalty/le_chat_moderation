@@ -24,6 +24,9 @@ from app.services.network import (
     set_selected_group,
 )
 from app.services.state import clear_votes, ensure_all_status_messages, ensure_status_message, log_error
+from app.services.vote_participation import (
+    bind_current_votes_to_session, cancel_commitments, resolve_session_commitments, session_commitment_stats,
+)
 
 OPEN_PERMS = {
     'can_send_messages': True,
@@ -194,6 +197,19 @@ async def _close_one(bot: Bot, chat_id: int, kind: str, *, cleanup: bool = True,
     # la fermeture des permissions. Le prochain tick/admin pourra réessayer.
     if not await _set_permissions(bot, chat_id, False):
         raise RuntimeError(f'Impossible de fermer les permissions du groupe {chat_id}.')
+    vote_stats = await resolve_session_commitments(bot, chat_id, sid, kind) if sid else {}
+    if vote_stats.get('banned'):
+        await notify_admins(
+            bot,
+            f'🚫 Vote sans participation — sanctions automatiques\n\n'
+            f'Groupe : {chat_id}\nVotants engagés : {vote_stats.get("total", 0)}\n'
+            f'Ont participé : {vote_stats.get("participated", 0)}\n'
+            f'Bannis globalement : {vote_stats.get("banned", 0)}',
+        )
+    # Nettoie aussi les clics arrivés en concurrence exacte avec l'ouverture :
+    # aucun vote résiduel ne doit pouvoir rouvrir la session après fermeture.
+    await clear_votes(chat_id)
+    await cancel_commitments(chat_id, reason='cancelled_session_close')
     if cleanup:
         await cleanup_session(bot, chat_id=chat_id, all_known=False)
     await close_active_session(chat_id)
@@ -252,11 +268,13 @@ async def set_group_open(bot: Bot, open_: bool, kind='auto', chat_id: int | None
 
             session_created = False
             try:
-                await _create_session(target, kind)
+                sid = await _create_session(target, kind)
                 session_created = True
                 await mark_active(target)
                 await st.set_value('group_open', 'true')  # compatibilité ancienne clé
                 await set_selected_group(target)
+                # Les votants sont liés à CETTE session avant consommation du compteur.
+                await bind_current_votes_to_session(target, sid)
                 # Les votes ayant servi à cette ouverture sont consommés. Sans
                 # cela une fermeture manuelle pendant le créneau pourrait rouvrir
                 # automatiquement le groupe au tick suivant.
@@ -378,13 +396,18 @@ async def send_report(bot: Bot, kind='auto', chat_id: int | None = None, sid: in
                 TrackedMessage.deleted.is_(False),
                 TrackedMessage.kind != 'status',
             ))).scalar() or 0
+    vote_stats = await session_commitment_stats(sid or 0)
     group = await get_group(target) if target else None
     text = (
         f'📊 RAPPORT DE SESSION\n\nGroupe : {(group.title if group else target) or "?"}\nType : {kind}\n'
         f'Messages vus : {session.messages_seen if session else 0}\n'
         f'Médias vus : {session.media_seen if session else 0}\n'
         f'Messages supprimés : {session.messages_deleted if session else 0}\n'
-        f'Messages restants suivis : {remain}\n\nInactifs jamais média : {inactive_count}\n\n'
+        f'Messages restants suivis : {remain}\n\n'
+        f'Votants engagés : {vote_stats["total"]}\n'
+        f'Votants participants : {vote_stats["participated"]}\n'
+        f'Bans vote sans participation : {vote_stats["banned"]}\n\n'
+        f'Inactifs jamais média : {inactive_count}\n\n'
         'Actions trusted :\n' + ('\n'.join(action_lines[-20:]) or 'Aucune') +
         f'\n\nErreurs 24h : {errors}'
     )

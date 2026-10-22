@@ -78,6 +78,57 @@ async def ban_global(bot: Bot, user_id: int, *, source_chat_id: int | None = Non
     return dict(results)
 
 
+async def ban_many_global(bot: Bot, user_ids, *, source_chat_id: int | None = None,
+                          reason: str = 'moderation', created_by: int | None = None) -> dict[str, int]:
+    """Ban réseau en masse, optimisé pour les sanctions de fin de session.
+
+    Les sanctions sont écrites avec UN seul commit PostgreSQL, puis les appels
+    Telegram sont limités globalement. Cela évite des centaines de commits et
+    de sous-gathers imbriqués quand beaucoup de votants n'ont pas participé.
+    """
+    protected = set(get_settings().all_admin_ids)
+    ids = sorted({int(uid) for uid in user_ids if int(uid) not in protected})
+    if not ids:
+        return {'users': 0, 'telegram_ok': 0, 'telegram_failed': 0}
+
+    async with SessionLocal() as db:
+        existing = list((await db.execute(select(GlobalSanction).where(
+            GlobalSanction.user_id.in_(ids),
+            GlobalSanction.sanction_type == 'ban',
+            GlobalSanction.active.is_(True),
+        ))).scalars().all())
+        by_user = {row.user_id: row for row in existing}
+        for uid in ids:
+            row = by_user.get(uid)
+            if row is None:
+                row = GlobalSanction(user_id=uid, sanction_type='ban', active=True)
+                db.add(row)
+            row.reason = reason
+            row.source_chat_id = source_chat_id
+            row.created_by = created_by
+            row.until_at = None
+            row.active = True
+        await db.execute(update(User).where(User.id.in_(ids)).values(is_banned=True))
+        await db.commit()
+
+    group_ids = await _reachable_group_ids()
+    sem = asyncio.Semaphore(12)
+
+    async def one(chat_id: int, uid: int) -> bool:
+        async with sem:
+            try:
+                await bot.ban_chat_member(chat_id, uid, request_timeout=10)
+                return True
+            except Exception as exc:
+                logger.warning('bulk global ban failed user=%s chat=%s: %s', uid, chat_id, exc)
+                return False
+
+    tasks = [one(chat_id, uid) for uid in ids for chat_id in group_ids]
+    results = await asyncio.gather(*tasks) if tasks else []
+    ok = sum(1 for value in results if value)
+    return {'users': len(ids), 'telegram_ok': ok, 'telegram_failed': len(results) - ok}
+
+
 async def restrict_global(bot: Bot, user_id: int, days: int, *, source_chat_id: int | None = None,
                           reason: str = 'moderation', created_by: int | None = None) -> dict[int, bool]:
     if _protected(user_id):

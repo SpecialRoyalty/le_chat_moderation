@@ -26,6 +26,7 @@ from app.services.network import (
     selected_chat_id,
 )
 from app.utils.time import countdown_text, day_key, in_slot
+from app.services.vote_participation import VOTE_POLICY_TEXT
 
 
 async def log_error(area, msg):
@@ -129,15 +130,19 @@ async def status_text(chat_id: int):
             if in_slot(slot, get_settings().timezone):
                 return '🟢 OBJECTIF ATTEINT\n\nOuverture en cours...'
             remaining = countdown_text(slot, get_settings().timezone, achieved=True)
+            policy = ('\n\n' + VOTE_POLICY_TEXT) if await st.group_bool(chat_id, 'vote_participation_enabled', True) else ''
             return (
                 f'🟡 OBJECTIF ATTEINT\n\nCe groupe ouvrira à {opening}.\n'
-                f'Ouverture dans : {remaining}\n\nObjectif : {votes} / {goal} ✅'
+                f'Ouverture dans : {remaining}\n\nParticipants engagés : {votes} / {goal} ✅'
+                f'{policy}'
             )
         remaining = countdown_text(slot, get_settings().timezone, achieved=False)
+        policy = ('\n\n' + VOTE_POLICY_TEXT) if await st.group_bool(chat_id, 'vote_participation_enabled', True) else ''
         return (
             f'🔴 GROUPE SÉLECTIONNÉ\n\nOuverture prévue à {opening}.\n'
-            f'Temps restant : {remaining}\n\nObjectif : {votes} / {goal}\n'
-            f'Il manque encore {missing} votes.'
+            f'Temps restant : {remaining}\n\nParticipants engagés : {votes} / {goal}\n'
+            f'Il manque encore {missing} participation(s).'
+            f'{policy}'
         )
 
     if selected:

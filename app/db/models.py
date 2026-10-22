@@ -238,6 +238,27 @@ class NetworkEvent(Base):
     created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 # ---------------------------------------------------------------------------
+# Engagement de participation lié aux votes d'ouverture
+# ---------------------------------------------------------------------------
+class VoteParticipation(Base):
+    __tablename__='vote_participation_test'
+    id: Mapped[int]=mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int]=mapped_column(BigInteger, index=True)
+    user_id: Mapped[int]=mapped_column(BigInteger, index=True)
+    day_key: Mapped[str]=mapped_column(String(20), index=True)
+    session_id: Mapped[int|None]=mapped_column(Integer, nullable=True, index=True)
+    participated: Mapped[bool]=mapped_column(Boolean, default=False, index=True)
+    resolved: Mapped[bool]=mapped_column(Boolean, default=False, index=True)
+    outcome: Mapped[str]=mapped_column(String(40), default='pending', index=True)
+    voted_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    participated_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
+    resolved_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
+    __table_args__=(
+        Index('ix_vote_participation_session_test','chat_id','session_id','resolved'),
+        Index('ix_vote_participation_user_test','user_id','resolved'),
+    )
+
+# ---------------------------------------------------------------------------
 # Registre média global / reprise des hash-bans
 # ---------------------------------------------------------------------------
 class GlobalMediaRegistry(Base):

@@ -3,7 +3,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 def vote_kb():
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text='🔓 Voter pour ouvrir le groupe', callback_data='vote_open')
+        InlineKeyboardButton(text='🔥 Je participe — Voter', callback_data='vote_open')
     ]])
 
 
@@ -48,10 +48,12 @@ def goal_kb():
     ])
 
 
-def settings_kb(media_before_text_enabled: bool | None = None):
+def settings_kb(media_before_text_enabled: bool | None = None, vote_participation_enabled: bool | None = None):
     media_label = '🟢 Média avant texte : ON' if media_before_text_enabled is not False else '🔴 Média avant texte : OFF'
+    vote_label = '🟢 Vote = participation : ON' if vote_participation_enabled is not False else '🔴 Vote = participation : OFF'
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=media_label, callback_data='media_before_text_toggle')],
+        [InlineKeyboardButton(text=vote_label, callback_data='vote_participation_toggle')],
         [InlineKeyboardButton(text='22h30 → 00h45', callback_data='slot_set:22:30-00:45')],
         [InlineKeyboardButton(text='22h00 → 00h00', callback_data='slot_set:22:00-00:00')],
         [InlineKeyboardButton(text='23h00 → 01h00', callback_data='slot_set:23:00-01:00')],

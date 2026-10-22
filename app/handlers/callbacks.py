@@ -8,6 +8,9 @@ from app.services.invites import send_invite_private
 from app.services.network import active_chat_id, default_target_chat_id, is_enabled_group, selected_chat_id
 from app.services.session_ops import set_group_open
 from app.services.state import add_vote, ensure_status_message, vote_count
+from app.services.vote_participation import (
+    VOTE_CONFIRM_ALERT, consume_or_arm_confirmation, has_current_vote, register_vote_commitment,
+)
 from app.utils.time import in_slot
 
 router = Router()
@@ -29,7 +32,15 @@ async def vote(cb: CallbackQuery, bot: Bot):
             pass
         return
 
+    enforcement = await st.group_bool(chat_id, 'vote_participation_enabled', True)
+    if enforcement and not await has_current_vote(chat_id, cb.from_user.id):
+        if not consume_or_arm_confirmation(chat_id, cb.from_user.id):
+            await cb.answer(VOTE_CONFIRM_ALERT, show_alert=True)
+            return
+
     added = await add_vote(chat_id, cb.from_user.id)
+    if added and enforcement:
+        await register_vote_commitment(chat_id, cb.from_user.id)
     goal = await st.group_vote_goal(chat_id)
     votes = await vote_count(chat_id)
     slot = await st.group_time_slot(chat_id)
@@ -37,7 +48,7 @@ async def vote(cb: CallbackQuery, bot: Bot):
         await set_group_open(bot, True, 'auto_vote', chat_id=chat_id)
     else:
         await ensure_status_message(bot, chat_id)
-    await cb.answer('Vote pris en compte ✅' if added else 'Vote déjà compté ✅')
+    await cb.answer('Engagement confirmé ✅' if added and enforcement else ('Vote pris en compte ✅' if added else 'Vote déjà compté ✅'))
 
 
 @router.callback_query(F.data == 'invite_private')

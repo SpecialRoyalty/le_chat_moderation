@@ -70,6 +70,22 @@ async def all_messages(msg: Message, bot: Bot):
             pass
         return
 
+    # Un administrateur anonyme apparaît comme @GroupAnonymousBot. Telegram
+    # ne révèle pas son vrai user_id : on autorise ses messages ordinaires mais
+    # on refuse les commandes trusted sensibles pour éviter d'attribuer un ban
+    # au pseudo-compte système ou d'autoriser n'importe quel admin anonyme.
+    if msg.sender_chat and msg.sender_chat.id == msg.chat.id:
+        if msg.text and msg.text.startswith('/'):
+            try:
+                await bot.delete_message(msg.chat.id, msg.message_id)
+                await bot.send_message(
+                    msg.chat.id,
+                    '⚠️ Commande trusted refusée en mode administrateur anonyme. Désactive le mode anonyme pour utiliser cette commande.',
+                )
+            except Exception:
+                pass
+        return
+
     # Commandes trusted avant les écritures non urgentes.
     if msg.text and await trusted_command(bot, msg):
         return

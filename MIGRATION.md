@@ -110,3 +110,8 @@ Après le premier démarrage, ouvrir **Santé** et vérifier :
 - Reprises hash-ban en attente / échecs finaux.
 
 Le registre global démarre vide pour les métadonnées nouvelles, mais l'anti-repost exact continue de consulter `media_hashes_test`, donc l'historique existant n'est pas perdu. Le registre s'enrichit progressivement au fil des nouveaux messages.
+
+
+## Table ajoutée : engagement des votants
+
+`vote_participation_test` est créée automatiquement par `Base.metadata.create_all()`. Aucun DROP/RESET n'est effectué et les hash-bans existants restent intacts.

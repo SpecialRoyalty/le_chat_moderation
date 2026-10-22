@@ -130,3 +130,8 @@ Le vieux système de paliers/récompenses n'est plus utilisé. Chaque invitation
 - `ADMIN_IDS` sont automatiquement inclus dans les trusted : il n'est pas nécessaire de dupliquer un ID dans `TRUSTED_IDS`.
 - Quand un groupe est fermé, les membres ordinaires restent bloqués par les permissions Telegram, mais les `ADMIN_IDS` et `TRUSTED_IDS` reçoivent une exception individuelle d'écriture.
 - Le réglage **Média avant texte** est maintenant ON/OFF par groupe depuis `⚙️ Paramètres`. ON conserve l'ancien comportement ; OFF autorise le texte dès l'arrivée.
+
+
+## Vote = participation
+
+Le groupe sélectionné affiche désormais l'avertissement de participation. Le premier clic sur le bouton de vote affiche une confirmation; le second clic sous 90 secondes enregistre réellement le vote. Si le groupe ouvre, le votant est lié à la session. Au moins un média valide (non hash-banni et non repost bloqué) doit être accepté pendant cette session. À la fermeture normale d'une session d'au moins 5 minutes, un votant sans média valide reçoit un ban global réseau. Les ADMIN_IDS/TRUSTED_IDS sont exemptés. Une session perdue/cassée ou trop courte n'applique pas de sanction automatique. Le réglage est ON/OFF par groupe dans Paramètres.

@@ -48,3 +48,20 @@ Les vrais téléchargements Telegram, les droits administrateur live et la Postg
 - Toggle par groupe `media_before_text_enabled` ajouté dans `⚙️ Paramètres`, ON par défaut.
 - `actions.py` et `hashban.py` sont inchangés par rapport à Media V2.
 - Suite de vérification : 87/87 contrôles OK.
+
+## Extension Vote = participation — 22 octobre 2026
+
+- Message dissuasif ajouté au statut du groupe sélectionné.
+- Bouton `🔥 Je participe — Voter`.
+- Premier clic : alerte de confirmation ; second clic sous 90 s : vote réellement compté.
+- Nouvelle table additive `vote_participation_test`.
+- Les votants sont liés à la session avant suppression du compteur de votes.
+- Un média ne valide la participation qu'après passage réussi du hash-ban, anti-repost et modération.
+- Fermeture normale après au moins 5 minutes : votants sans média valide => ban global réseau.
+- ADMIN_IDS / TRUSTED_IDS exemptés des sanctions automatiques.
+- Groupe perdu / session trop courte => engagements annulés sans ban.
+- Bans massifs optimisés : un commit PostgreSQL puis appels Telegram limités en concurrence.
+- Votes résiduels de concurrence ouverture/fermeture purgés.
+- Admin anonyme : messages ordinaires autorisés, commandes trusted sensibles refusées proprement.
+- `actions.py` et `hashban.py` inchangés par rapport à Media V2 Adminfix.
+- Vérification projet : `FINAL3_PASS=108`, `FINAL3_FAIL=0`.

@@ -9,10 +9,13 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 
 from app.config import get_settings
-from app.db.models import GroupWordRule, WordRule
+from app.db.models import AmnestyCampaign, GroupWordRule, WordRule
 from app.db.session import SessionLocal
 from app.keyboards.common import admin_kb, ads_admin_kb
 from app.keyboards.common import (
+    amnesty_menu_kb,
+    amnesty_preview_kb,
+    amnesty_progress_kb,
     back_kb,
     broadcast_targets_kb,
     cleanup_kb,
@@ -28,6 +31,10 @@ from app.keyboards.common import (
     top_admin_kb,
 )
 from app.services import settings as st
+from app.services.amnesty import (
+    build_preview, cancel_preview, campaign_log_text, campaign_progress, confirm_campaign,
+    preview_text, process_amnesty_jobs, retry_failed_campaign,
+)
 from app.services.ads import (
     add_ad,
     ad_detail,
@@ -260,6 +267,20 @@ async def admin_cb(cb: CallbackQuery, bot: Bot):
         )
     elif data == 'adm_reports':
         await cb.message.answer('📊 Les rapports de fermeture indiquent désormais le groupe concerné.', reply_markup=back_kb())
+    elif data == 'adm_amnesty':
+        if not is_root_admin(uid) or cb.message.chat.type != 'private':
+            await cb.answer('Réservé aux ADMIN_IDS en privé.', show_alert=True)
+            return
+        async with SessionLocal() as db:
+            last = (await db.execute(select(AmnestyCampaign.id).order_by(AmnestyCampaign.id.desc()).limit(1))).scalar_one_or_none()
+        await cb.message.answer(
+            '🕊️ CAMPAGNE DE DÉBAN RÉSEAU\n\n'
+            'Simulation puis confirmation obligatoire.\n'
+            'Uniquement les bans automatiques explicitement révisables.\n'
+            'Les /pedo, hash-bans, bannissements manuels, motifs inconnus et règles de sécurité restent exclus.\n'
+            'Les bans sur Telegram dont l’ID n’est pas en base ne peuvent pas être énumérés.',
+            reply_markup=amnesty_menu_kb(last),
+        )
     elif data == 'adm_hashban':
         await cb.message.answer('🚫 Hash ban GLOBAL\n\nUn média blacklisté ici est interdit dans tous les groupes.', reply_markup=hashban_kb())
     elif data == 'adm_settings':
@@ -950,6 +971,55 @@ async def admin_text_state(msg: Message, bot: Bot):
                 return
     finally:
         await clear_admin_state(uid)
+
+
+@router.callback_query(F.data.startswith('amnesty_'))
+async def amnesty_callback(cb: CallbackQuery, bot: Bot):
+    if (not cb.from_user or not is_root_admin(cb.from_user.id)
+            or not cb.message or cb.message.chat.type != 'private'):
+        await cb.answer('Réservé aux ADMIN_IDS en privé.', show_alert=True)
+        return
+    uid = cb.from_user.id
+    data = cb.data or ''
+    await cb.answer()
+    try:
+        if data == 'amnesty_sim':
+            campaign = await build_preview(uid)
+            kb = amnesty_preview_kb(campaign.id) if campaign.eligible_count else amnesty_menu_kb(campaign.id)
+            await cb.message.answer(preview_text(campaign), reply_markup=kb)
+        elif data.startswith('amnesty_confirm:'):
+            campaign_id = int(data.split(':', 1)[1])
+            released, attempts = await confirm_campaign(campaign_id, uid)
+            await cb.message.answer(
+                f'🕊️ Campagne #{campaign_id} confirmée.\n'
+                f'Sanctions centrales levées : {released}.\n'
+                f'Débans Telegram planifiés : {attempts}.\n'
+                'Les échecs réseau seront journalisés et retentés.',
+                reply_markup=amnesty_progress_kb(campaign_id),
+            )
+            # Non bloquant : le scheduler reprendra après un redémarrage.
+            asyncio.create_task(process_amnesty_jobs(bot))
+        elif data.startswith('amnesty_cancel:'):
+            campaign_id = int(data.split(':', 1)[1])
+            cancelled = await cancel_preview(campaign_id, uid)
+            await cb.message.answer('✅ Simulation annulée, aucun déban.' if cancelled else 'Cette simulation est déjà clôturée.')
+        elif data.startswith('amnesty_status:'):
+            campaign_id = int(data.split(':', 1)[1])
+            await cb.message.answer(await campaign_progress(campaign_id), reply_markup=amnesty_progress_kb(campaign_id))
+        elif data.startswith('amnesty_log:'):
+            campaign_id = int(data.split(':', 1)[1])
+            await cb.message.answer(await campaign_log_text(campaign_id), reply_markup=amnesty_progress_kb(campaign_id))
+        elif data.startswith('amnesty_retry:'):
+            campaign_id = int(data.split(':', 1)[1])
+            count = await retry_failed_campaign(campaign_id, uid)
+            await cb.message.answer(
+                f'🔄 {count} échec(s) remis en file de traitement.', reply_markup=amnesty_progress_kb(campaign_id)
+            )
+            if count:
+                asyncio.create_task(process_amnesty_jobs(bot))
+    except Exception as exc:
+        await log_error('amnesty', exc)
+        await cb.message.answer(f'❌ Campagne non exécutée : {type(exc).__name__}: {exc}')
 
 
 @router.callback_query(F.data == 'manual_keep_open')

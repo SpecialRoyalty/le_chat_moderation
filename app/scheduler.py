@@ -8,6 +8,7 @@ from app.services import settings as st
 from app.services.ads import send_random_ad
 from app.services.invites import send_invite_ad, top_text, validate_invites
 from app.services.hashban import process_pending_hashban_jobs
+from app.services.amnesty import process_amnesty_jobs
 from app.services.network import (
     active_chat_id,
     default_target_chat_id,
@@ -98,5 +99,6 @@ def start_scheduler(bot: Bot):
     # repris sans bloquer la commande trusted. max_instances=1 évite tout
     # chevauchement en cas de ralentissement réseau.
     scheduler.add_job(process_pending_hashban_jobs, 'interval', minutes=2, args=[bot], id='hashban_retry')
+    scheduler.add_job(process_amnesty_jobs, 'interval', minutes=1, args=[bot], id='amnesty_worker')
     scheduler.start()
     return scheduler

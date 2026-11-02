@@ -21,7 +21,7 @@ def admin_kb():
         [('📣 Broadcast', 'adm_broadcast')],
         [('🎁 Invitations', 'adm_invites'), ('🏆 Top inviteurs', 'adm_top')],
         [('🛡️ Modération', 'adm_mod'), ('📜 Règles', 'adm_rules')],
-        [('🚫 Hash ban global', 'adm_hashban')],
+        [('🚫 Hash ban global', 'adm_hashban'), ('🕊️ Campagne de déban', 'adm_amnesty')],
         [('📊 Rapports', 'adm_reports'), ('⚙️ Paramètres', 'adm_settings')],
     ]
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -203,3 +203,27 @@ def broadcast_targets_kb(groups):
             rows.append([InlineKeyboardButton(text=f'🏠 {(g.title or str(g.chat_id))[:38]}', callback_data=f'broadcast_target:{g.chat_id}')])
     rows.append([InlineKeyboardButton(text='⬅️ Retour', callback_data='adm_dashboard')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def amnesty_menu_kb(last_id: int | None = None):
+    rows = [[InlineKeyboardButton(text='🔎 Simuler une campagne (sans déban)', callback_data='amnesty_sim')]]
+    if last_id:
+        rows.append([InlineKeyboardButton(text='📊 Journal / progression', callback_data=f'amnesty_status:{last_id}')])
+    rows.append([InlineKeyboardButton(text='⬅️ Retour', callback_data='adm_dashboard')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def amnesty_preview_kb(campaign_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='✅ CONFIRMER LES DÉBANS', callback_data=f'amnesty_confirm:{campaign_id}')],
+        [InlineKeyboardButton(text='❌ Annuler sans rien faire', callback_data=f'amnesty_cancel:{campaign_id}')],
+    ])
+
+
+def amnesty_progress_kb(campaign_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🔄 Rafraîchir', callback_data=f'amnesty_status:{campaign_id}')],
+        [InlineKeyboardButton(text='📑 Journal par groupe', callback_data=f'amnesty_log:{campaign_id}')],
+        [InlineKeyboardButton(text='🔁 Retenter les échecs', callback_data=f'amnesty_retry:{campaign_id}')],
+        [InlineKeyboardButton(text='⬅️ Campagnes', callback_data='adm_amnesty')],
+    ])

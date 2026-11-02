@@ -8,7 +8,7 @@ from aiogram import Bot
 from sqlalchemy import select, update
 
 from app.config import get_settings
-from app.db.models import GlobalSanction, NetworkGroup, User
+from app.db.models import GlobalSanction, NetworkGroup, SanctionHistory, User
 from app.db.session import SessionLocal
 from app.services import settings as st
 
@@ -50,6 +50,10 @@ async def _record_sanction(user_id: int, sanction_type: str, *, reason: str,
         row.created_by = created_by
         row.until_at = until_at
         row.active = True
+        db.add(SanctionHistory(
+            user_id=user_id, sanction_type=sanction_type, reason=reason,
+            source_chat_id=source_chat_id, created_by=created_by,
+        ))
         if sanction_type == 'ban':
             await db.execute(update(User).where(User.id == user_id).values(is_banned=True))
         elif sanction_type == 'restrict':
@@ -108,6 +112,10 @@ async def ban_many_global(bot: Bot, user_ids, *, source_chat_id: int | None = No
             row.created_by = created_by
             row.until_at = None
             row.active = True
+            db.add(SanctionHistory(
+                user_id=uid, sanction_type='ban', reason=reason,
+                source_chat_id=source_chat_id, created_by=created_by,
+            ))
         await db.execute(update(User).where(User.id.in_(ids)).values(is_banned=True))
         await db.commit()
 

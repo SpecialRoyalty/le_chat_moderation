@@ -302,3 +302,54 @@ class MediaBanJob(Base):
     created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     __table_args__=(Index('ix_media_ban_job_pending_test','status','next_attempt_at'),)
+
+# ---------------------------------------------------------------------------
+# Campagnes de réhabilitation (additif, aucun changement aux tables historiques)
+# ---------------------------------------------------------------------------
+class SanctionHistory(Base):
+    __tablename__ = 'sanction_history_test'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    sanction_type: Mapped[str] = mapped_column(String(30), index=True)
+    reason: Mapped[str] = mapped_column(String(100), default='moderation')
+    source_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+class AmnestyCampaign(Base):
+    __tablename__ = 'amnesty_campaigns_test'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_by: Mapped[int] = mapped_column(BigInteger, index=True)
+    status: Mapped[str] = mapped_column(String(24), default='preview', index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    eligible_count: Mapped[int] = mapped_column(Integer, default=0)
+    excluded_count: Mapped[int] = mapped_column(Integer, default=0)
+    unknown_count: Mapped[int] = mapped_column(Integer, default=0)
+    targeted_groups: Mapped[int] = mapped_column(Integer, default=0)
+    report: Mapped[str] = mapped_column(Text, default='')
+
+class AmnestyCandidate(Base):
+    __tablename__ = 'amnesty_candidates_test'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    campaign_id: Mapped[int] = mapped_column(Integer, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    reason: Mapped[str] = mapped_column(String(100), default='')
+    status: Mapped[str] = mapped_column(String(24), default='preview', index=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (UniqueConstraint('campaign_id', 'user_id', name='uq_amnesty_campaign_user_test'),)
+
+class AmnestyAttempt(Base):
+    __tablename__ = 'amnesty_attempts_test'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    campaign_id: Mapped[int] = mapped_column(Integer, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    status: Mapped[str] = mapped_column(String(24), default='pending', index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(Text, default='')
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    __table_args__ = (UniqueConstraint('campaign_id', 'user_id', 'chat_id', name='uq_amnesty_attempt_test'),)

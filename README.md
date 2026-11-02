@@ -135,3 +135,8 @@ Le vieux système de paliers/récompenses n'est plus utilisé. Chaque invitation
 ## Vote = participation
 
 Le groupe sélectionné affiche désormais l'avertissement de participation. Le premier clic sur le bouton de vote affiche une confirmation; le second clic sous 90 secondes enregistre réellement le vote. Si le groupe ouvre, le votant est lié à la session. Au moins un média valide (non hash-banni et non repost bloqué) doit être accepté pendant cette session. À la fermeture normale d'une session d'au moins 5 minutes, un votant sans média valide reçoit un ban global réseau. Les ADMIN_IDS/TRUSTED_IDS sont exemptés. Une session perdue/cassée ou trop courte n'applique pas de sanction automatique. Le réglage est ON/OFF par groupe dans Paramètres.
+
+## Campagne de déban réseau
+
+Nouveau bouton dans le panneau privé admin : **🕊️ Campagne de déban**.
+Simulation chiffrée, confirmation 15 min, exclusions des bans sensibles, reprise des débans Telegram et journal central. Voir [AMNESTY.md](AMNESTY.md) pour les limitations et le mode d'emploi. Le code existant des médias, des votes, des invitations et des commandes trusted n'a pas été modifié.

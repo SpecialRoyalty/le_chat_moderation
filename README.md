@@ -1,142 +1,79 @@
-# GROSCHAT Central — réseau multi-groupes
+# Telegram Guard Bot V8 — correction des paiements et groupes automatiques
 
-Cette version transforme l'ancien bot mono-groupe en **un seul bot central** capable de piloter un nombre dynamique de groupes Telegram depuis une base PostgreSQL commune.
+> **Version de développement.** Syntaxe Python et tests locaux vérifiés ; aucun test de bout en bout n'a été réalisé avec Telegram, PostgreSQL ou Railway. Faites un essai sur un groupe isolé **avant** de remplacer un bot en production.
 
-## Principes
+## Corrections V8
 
-- Les groupes ne sont pas codés dans les variables d'environnement.
-- Quand le bot est ajouté à un groupe, celui-ci devient `PENDING`.
-- Seuls les utilisateurs présents dans `ADMIN_IDS` peuvent accepter/refuser ce groupe depuis le privé.
-- Un groupe approuvé peut être `ON` ou `OFF` indépendamment.
-- Un seul groupe peut être **ACTIF/ouvert** à la fois.
-- Un groupe **SÉLECTIONNÉ** reçoit le prochain vote / la prochaine ouverture.
-- Les groupes fermés affichent automatiquement le groupe actif (ou sélectionné) avec un lien de redirection.
-- Les groupes privés sans username public utilisent un deep-link du bot ; le bot revalide toujours la cible au clic.
-- Le failover sélectionne un groupe de remplacement sain mais **ne l'ouvre pas automatiquement**.
+- **Crypto, PayPal, Revolut** sont les trois méthodes de commande manuelle proposées. Les frais Apple Pay de 15 % sont supprimés. Les méthodes non configurées dans Railway ne produisent pas de bouton inutilisable.
+- Le panneau de paiement affiche un montant en euros et le bot demande une image du justificatif. **Seul un OWNER peut approuver**, après avoir lui-même vérifié la réception effective des fonds ; le screenshot ne valide jamais un achat.
+- **Groupes détectés automatiquement** : lorsqu'un administrateur Telegram ajoute le bot dans un supergroupe, un enregistrement est créé en PostgreSQL puis le bot affiche une confirmation. Les droits sont revérifiés au clic. Sans cette confirmation, il n'active aucune modération.
+- Chaque supergroupe principal dispose d'un schéma PostgreSQL distinct ; les menus privés permettent de choisir le groupe.
+- Le bot peut démarrer **sans `GROUP_ID` ni `GROUP_IDS`**. Il relit le registre à chaque démarrage. Pour une migration V7, il récupère aussi les anciens schémas `guard_<id>` et conserve le groupe associé à `public`.
+- Les justificatifs et leurs boutons d'approbation sont désormais retrouvés **dans le groupe de la commande**, même si le propriétaire a sélectionné un autre groupe dans son panneau.
+- Les anciens achats en Paysafecard / Apple Pay sont conservés comme **historique** en base, mais aucun nouveau checkout ne les propose.
 
-## Portée des données
+## Variables d'environnement sur Railway
 
-### Globales au réseau
+```dotenv
+BOT_TOKEN=123456:VOTRE_TOKEN_BOTFATHER
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+OWNER_IDS=123456789
+TRUSTED_USER_IDS=234567890,345678901
+TZ=Europe/Paris
 
-- `/pedo` et bans graves.
-- Restrictions/mutes provenant du moteur de modération.
-- `media_hashes_test` (file_unique_id + SHA256).
-- `media_fingerprints_test` (empreintes perceptuelles).
-- Name Ban / Mot Ban / Mot Interdit globaux.
-- Utilisateurs connus et historique central.
-- Admins / Trusted.
-- Publicités configurées (le ON/OFF de diffusion reste local).
+PAYMENT_CRYPTO_DETAILS=Adresse et réseau crypto à afficher
+PAYMENT_PAYPAL_DETAILS=Instructions PayPal à afficher
+PAYMENT_REVOLUT_DETAILS=Instructions Revolut à afficher
+```
 
-### Propres à chaque groupe
+- **Obligatoires** : `BOT_TOKEN`, `DATABASE_URL`, `OWNER_IDS`.
+- **Facultatives** : `TRUSTED_USER_IDS`, `TZ` et les 3 variables `PAYMENT_*` ; une méthode sans instruction n'est pas affichée au client.
+- **Inutiles en utilisation normale** : `GROUP_ID` et `GROUP_IDS`. Pour un ancien déploiement **V6 qui n'avait pas encore de registre de groupes**, fournissez temporairement le `GROUP_ID` original lors de la première mise à jour pour associer correctement le schéma `public` et préserver ses données. Pour une V7, le registre `public.guard_registry` suffit normalement.
+- Retirer de Railway `PAYMENT_PAYSAFECARD_DETAILS` et `PAYMENT_APPLE_PAY_DETAILS` : ils ne servent plus à rien.
+- Ne jamais publier le token Telegram, les chaînes de connexion, adresses privées ou captures de paiements.
 
-- ON/OFF du groupe.
-- État ouvert/fermé.
-- Votes et sessions.
-- Invitations et compteurs par lien/groupe.
-- Arrivée récente et règle média < 60 secondes.
-- Anti-repost ON/OFF.
-- Publicités ON/OFF.
-- Horaires/objectifs de vote.
-- Message de statut/maintenance.
-- Règles locales ajoutées aux règles globales.
+## Mise à jour V7 → V8 sans mélanger les données
 
-## Perte d'un groupe
+1. **Sauvegarder PostgreSQL** (snapshot/export Railway) et conserver l'archive de la V7 pour revenir en arrière si nécessaire.
+2. Remplacer les sources par celles de la V8 ; conserver **la même base PostgreSQL**, pas une base neuve.
+3. Ajouter `PAYMENT_PAYPAL_DETAILS` et `PAYMENT_REVOLUT_DETAILS`, conserver `PAYMENT_CRYPTO_DETAILS`. Supprimer les 2 anciennes variables de paiement.
+4. Vous pouvez retirer `GROUP_IDS` : le registre des groupes V7 est relu en base et les schémas `guard_<id>` existants sont découverts. Si vous venez directement de V6, garder `GROUP_ID` pour le premier démarrage de migration.
+5. Déployer **une seule instance Worker** (`python -m app`) ; un seul polling Telegram par token.
+6. Dans un nouveau **supergroupe**, ajouter le bot en tant qu'administrateur ; accorder les droits de suppression, restriction, invitation et épinglage. Le bot doit proposer `✅ Confirmer`, `🔄 Revérifier`, `❌ Annuler` ; si le message n'arrive pas, un admin envoie `/setup` dans le groupe.
+7. Dans le chat privé du bot, le propriétaire utilise `/panel` puis **🌍 Choisir le groupe**. Les paramètres, VIP, invitations et statistiques ne sont pas communs entre groupes principaux.
+8. Tester sur un groupe de test : **création**, **confirmation**, **ouverture et fermeture**, **modération**, **parrainage**, **commande VIP**, **preuve**, **approbation**, **demande d'adhésion**, **expiration**, puis **redémarrage Railway**.
 
-Le bot écoute `my_chat_member` et effectue aussi un contrôle de santé périodique. Un timeout Telegram isolé **ne déclare jamais un groupe perdu**.
+> **Important** : La détection et la confirmation automatiques concernent actuellement les **groupes principaux gérés par horaires**. Les groupes de destination VIP restent déclarés dans la configuration d'une offre (panneau 💎 VIP) afin d'éviter de les fermer comme un groupe principal. Il n'existe pas encore de sélecteur automatique de rôle `principal / VIP / logs` au moment de l'ajout. Cela reste une limitation fonctionnelle.
 
-Un groupe peut être déclaré `OFFLINE` automatiquement sur signal fort (bot expulsé, plus admin, accès durablement interdit) ou `LOST` manuellement par un ADMIN_ID.
+## Fonctions du bot conservées
 
-Lors d'une perte :
+- Panneau **propriétaire à boutons** (`/panel`) : horaires, auto ON/OFF, ouverture manuelle avec sécurité, fermeture, décomptes, modération, filtres, trusted, publicités, règles, VIP, commandes, médias et santé.
+- Modération et empreintes médias : identifiant Telegram, SHA-256, hash perceptuel photos, vidéo sur plusieurs images via FFmpeg, anti-repost et contrôles des nouvelles arrivées.
+- Trusted users : commandes réservées (`/pedo`, `/mineur`, etc.). Leurs droits sont différents des propriétaires et ne donnent pas accès à l'approbation des paiements.
+- Invitations : lien personnel, points attribués après présence, tableau de bord, TOP 10 masqué et tirage au sort.
+- VIP : sélection multiple, prix en euros, durée personnalisable (dont **24 h**), accès à vie, groupe 24/24, déblocage par invitations ou commande manuelle, lien d'adhésion avec vérification de l'identifiant Telegram, notification/expiration.
 
-1. la session et le vote du groupe sont annulés ;
-2. toutes ses invitations actives sont invalidées immédiatement en PostgreSQL ;
-3. le bot tente aussi de révoquer physiquement les liens chez Telegram ;
-4. le groupe sort de la rotation ;
-5. un autre groupe sain peut devenir la prochaine cible ;
-6. les statuts des autres groupes sont mis à jour ;
-7. les sanctions et hash-bans restent intacts car ils sont globaux.
+## Paiement : avertissement Telegram
 
-Les membres déjà connus du réseau bénéficient d'une courte exemption de migration afin qu'une bascule vers un groupe de secours ne déclenche pas à tort la règle « média dans les 60 secondes ».
+**Telegram exige officiellement Telegram Stars (`XTR`) pour vendre des biens et accès numériques *dans les bots*.** Le parcours externe Crypto / PayPal / Revolut de cette V8 peut contrevenir aux règles Telegram et provoquer une restriction du bot. Le fait de présenter une commande comme « manuelle » ne change pas cette obligation. Cette version fournit le flux demandé mais **n'est pas un système de vente d'accès numériques conforme à Telegram**. Pour mettre ce parcours en production dans Telegram, il faut utiliser Stars. Voir https://core.telegram.org/bots/payments-stars et https://telegram.org/tos/bot-developers.
 
-## Invitations
+Une capture d'écran de transfert est falsifiable. L'OWNER doit vérifier la réception dans son compte PayPal/Revolut ou la confirmation on-chain avant d'appuyer sur le bouton de validation.
 
-Les nouvelles invitations sont stockées dans `group_invite_links_test` avec leur `group_chat_id`. Une invitation d'un groupe ne valide rien dans un autre groupe.
+## Limites et cohérence
 
-La validation différée (5 minutes) est persistée dans `pending_invite_validations_test`, donc un redémarrage Railway ne fait plus perdre une validation en attente. Un membre parti avant les 5 minutes n'est pas crédité.
+- Les bans **ne se synchronisent pas automatiquement entre plusieurs groupes**. Le panneau et les listes d'empreintes bannies sont actuellement propres à chaque groupe principal.
+- Les anciens membres inconnus ne peuvent pas tous être listés par l'API Bot Telegram. Le suivi entre/sorties est basé sur les événements observés, les effectifs réels utilisent l'API compteur de Telegram.
+- Effacer des messages anciens reste soumis aux limitations de suppression de l'API Telegram ; l'analyse perceptuelle des grosses vidéos est asynchrone et non instantanée.
+- La base crée un petit pool de connexions **par groupe** : surveiller le nombre de connexions PostgreSQL si vous ajoutez des dizaines de groupes.
+- La détection automatique ne doit pas être confondue avec une fonction d'administration globale de rôles VIP/logs. Un groupe VIP ne doit pas être activé par erreur comme un groupe principal à horaires.
+- Les droits admin du bot et le paramètre Privacy Mode (BotFather) doivent être testés sur Telegram réel ; la compilation ne peut pas prouver leur bon fonctionnement.
+- Si un ancien bot V6 utilisait déjà le schéma `public` sans la table `guard_registry`, **ne lancez pas V8 sur un nouveau groupe avec cette ancienne base sans indiquer d'abord le `GROUP_ID` historique**.
 
-## Migration depuis l'ancienne base
+## Tests locaux
 
-**Ne supprime pas l'ancienne base.** Utilise exactement la même `DATABASE_URL` si tu veux conserver les hash-bans, empreintes perceptuelles, utilisateurs, règles et historique existants.
+```bash
+python run_tests.py
+python -m compileall -q .
+```
 
-`Base.metadata.create_all()` ne supprime pas les tables existantes : il crée uniquement les nouvelles tables réseau manquantes.
-
-Les tables historiques `media_hashes_test` et `media_fingerprints_test` gardent exactement le même schéma que dans la version `GROSCHAT-main-fast-optimized`.
-
-Pour le premier déploiement seulement, tu peux laisser `MAIN_GROUP_ID` avec l'ID du groupe principal historique. Cela permet d'importer son état et ses anciens liens vers le registre multi-groupes. Un marqueur de migration empêche ensuite cette variable de ressusciter un groupe déclaré perdu.
-
-Voir `MIGRATION.md` pour la procédure complète.
-
-## Déploiement recommandé
-
-Cette édition est conçue pour **un seul BOT_TOKEN administrateur de tous les groupes**. Si tu utilises actuellement trois bots différents, choisis le bot central, ajoute-le comme administrateur à tous les groupes, valide les groupes depuis le privé, puis arrête les anciens déploiements pour éviter qu'ils modifient les permissions en parallèle.
-
-Droits administrateur minimum vérifiés avant activation d'un groupe :
-
-- supprimer les messages ;
-- restreindre/bannir les membres ;
-- inviter des utilisateurs.
-
-L'activation (`ON`) confirme aussi que le bot peut réellement maintenir le groupe fermé avant de modifier la base.
-
-## Vérifications incluses
-
-Le dossier `tests/verify_project.py` effectue des contrôles statiques/non destructifs : compilation Python, compatibilité des anciennes tables, conservation des tables de hash-ban, absence de migration destructive, logique d'isolation des mots, deep-links groupe et garde-fous réseau.
-
-Ces tests ne remplacent pas un essai réel Telegram/Railway : les appels Bot API et PostgreSQL live nécessitent les identifiants et le réseau de production.
-
-## Ban manuel global + redirection réseau
-
-- Un membre banni avec `/pedo` est enregistré comme ban global puis banni dans tous les groupes approuvés, même s'il n'y est pas encore membre.
-- Un ban effectué manuellement par un administrateur depuis l'interface Telegram (`chat_member -> kicked`) est également converti en ban global. Les updates produites par le bot lui-même sont ignorées pour éviter les boucles.
-- Si un groupe était hors ligne au moment du ban, la sanction reste en PostgreSQL et est réappliquée à son retour ou à l'arrivée de l'utilisateur.
-- Lorsqu'un nouveau groupe est approuvé, toutes les sanctions globales actives sont réconciliées avant son utilisation.
-- Les anciens messages `MAINTENANCE` sont remplacés par des messages `CE GROUPE EST EN PAUSE` / `PROCHAINE SESSION`.
-- Le bouton de redirection utilise automatiquement le lien public du groupe, son lien principal Telegram lorsqu'il est disponible, ou un lien direct réseau créé par le bot pour un groupe privé. Aucun réglage manuel n'est nécessaire dans le cas normal.
-- Le lien direct réseau privé est invalidé lorsque le groupe devient indisponible ou est désactivé.
-
-## Média V2 — anti-repost réseau + /pedo renforcé
-
-Cette édition ajoute un registre média global sans modifier les anciennes tables de blacklist.
-
-- Le ON/OFF anti-repost reste **propre au groupe**, mais l'historique consulté est celui de **tout le réseau**.
-- Détection anti-repost en 3 niveaux : `file_unique_id` → SHA256 → empreinte perceptuelle stricte.
-- Une vidéo déjà analysée n'est pas retraitée inutilement : le registre `global_media_registry_test` mémorise son état et la génération de blacklist vérifiée.
-- Le fichier n'est téléchargé qu'une seule fois pour SHA + analyse visuelle.
-- L'analyse vidéo entrante utilise 6 images ; `/pedo` en utilise 12 et plusieurs variantes de recadrage/miroir afin de mieux résister aux réencodages et modifications légères.
-- Les recherches perceptuelles utilisent un index BK-tree en mémoire au lieu de comparer chaque nouvelle vidéo à chaque empreinte une par une.
-- L'index SAFE est conservé et enrichi incrémentalement, afin d'éviter les reconstructions répétées quand la médiathèque grossit.
-- `/pedo` blackliste immédiatement le `file_unique_id` **avant** l'analyse lourde, puis ajoute SHA + empreintes visuelles.
-- Si Telegram/FFmpeg échoue, `media_ban_jobs_test` conserve une reprise automatique. Le scheduler retente jusqu'à 5 fois.
-- `/pedo` promeut aussi en blacklist globale tous les anciens médias déjà attribués à l'utilisateur ciblé.
-- `/hashdemande` affiche désormais l'état réseau, le SHA, la correspondance perceptuelle, le registre et les reprises éventuelles.
-
-### Invitations
-
-Le vieux système de paliers/récompenses n'est plus utilisé. Chaque invitation validée ajoute simplement `+1` à `total_invites`. Ce compteur est cumulatif et n'est jamais remis à zéro. Le TOP inviteurs utilise ce même compteur global.
-
-
-## Permissions admins/trusted et groupe fermé
-
-- `ADMIN_IDS` sont automatiquement inclus dans les trusted : il n'est pas nécessaire de dupliquer un ID dans `TRUSTED_IDS`.
-- Quand un groupe est fermé, les membres ordinaires restent bloqués par les permissions Telegram, mais les `ADMIN_IDS` et `TRUSTED_IDS` reçoivent une exception individuelle d'écriture.
-- Le réglage **Média avant texte** est maintenant ON/OFF par groupe depuis `⚙️ Paramètres`. ON conserve l'ancien comportement ; OFF autorise le texte dès l'arrivée.
-
-
-## Vote = participation
-
-Le groupe sélectionné affiche désormais l'avertissement de participation. Le premier clic sur le bouton de vote affiche une confirmation; le second clic sous 90 secondes enregistre réellement le vote. Si le groupe ouvre, le votant est lié à la session. Au moins un média valide (non hash-banni et non repost bloqué) doit être accepté pendant cette session. À la fermeture normale d'une session d'au moins 5 minutes, un votant sans média valide reçoit un ban global réseau. Les ADMIN_IDS/TRUSTED_IDS sont exemptés. Une session perdue/cassée ou trop courte n'applique pas de sanction automatique. Le réglage est ON/OFF par groupe dans Paramètres.
-
-## Campagne de déban réseau
-
-Nouveau bouton dans le panneau privé admin : **🕊️ Campagne de déban**.
-Simulation chiffrée, confirmation 15 min, exclusions des bans sensibles, reprise des débans Telegram et journal central. Voir [AMNESTY.md](AMNESTY.md) pour les limitations et le mode d'emploi. Le code existant des médias, des votes, des invitations et des commandes trusted n'a pas été modifié.
+Les tests de logique et de câblage sont exécutables sans identifiants. **Les dépendances `python-telegram-bot` et `asyncpg` ne sont pas présentes dans l'environnement de validation utilisé ici** ; un test réel de l'API Telegram et des migrations PostgreSQL reste à faire.
